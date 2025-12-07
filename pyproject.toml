@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 authors = [
     { name = "Sean Corkum" }
 ]
@@ -23,8 +23,9 @@ dependencies = [
     "fastmcp>=2.0.0",
     "sentence-transformers>=3.0.0",
     "sqlite-vec>=0.1.0",
-    "numpy>=1.26.0",
+    "numpy>=1.26.0,<2.0.0",  # Pin numpy <2.0 for torch 2.2.x compatibility
     "pydantic>=2.0.0",
+    "torch>=2.0.0,<=2.2.2",  # Pin torch <=2.2.2 for macOS x86_64 (Intel) compatibility
 ]
 
 [project.optional-dependencies]
