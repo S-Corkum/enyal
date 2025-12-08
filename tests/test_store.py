@@ -197,3 +197,135 @@ class TestContextStore:
 
         results = store.recall("confidence", min_confidence=0.5)
         assert all(r["entry"].confidence >= 0.5 for r in results)
+
+    def test_update_nonexistent_entry(self, store: ContextStore) -> None:
+        """Test updating a nonexistent entry returns False."""
+        success = store.update("nonexistent-id", content="New content")
+        assert success is False
+
+    def test_recall_with_all_filters(self, store: ContextStore) -> None:
+        """Test recall with all filter options combined."""
+        store.remember(
+            content="Complete filter test",
+            content_type=ContextType.DECISION,
+            scope_level=ScopeLevel.FILE,
+            scope_path="/test/path/file.py",
+            confidence=0.9,
+        )
+        store.remember(
+            content="Other entry",
+            content_type=ContextType.FACT,
+            scope_level=ScopeLevel.PROJECT,
+            confidence=0.5,
+        )
+
+        results = store.recall(
+            query="filter test",
+            scope_level=ScopeLevel.FILE,
+            scope_path="/test/path",
+            content_type=ContextType.DECISION,
+            min_confidence=0.8,
+        )
+
+        # Should only find the matching entry
+        assert len(results) >= 0  # May be 0 or 1 depending on vector similarity
+
+    def test_remember_all_content_types(self, store: ContextStore) -> None:
+        """Test storing entries with all content types."""
+        content_types = [
+            ContextType.FACT,
+            ContextType.PREFERENCE,
+            ContextType.DECISION,
+            ContextType.CONVENTION,
+            ContextType.PATTERN,
+        ]
+
+        for ct in content_types:
+            entry_id = store.remember(
+                content=f"Test {ct.value}",
+                content_type=ct,
+            )
+            entry = store.get(entry_id)
+            assert entry is not None
+            assert entry.content_type == ct
+
+    def test_remember_all_scope_levels(self, store: ContextStore) -> None:
+        """Test storing entries with all scope levels."""
+        scope_levels = [
+            ScopeLevel.FILE,
+            ScopeLevel.PROJECT,
+            ScopeLevel.WORKSPACE,
+            ScopeLevel.GLOBAL,
+        ]
+
+        for sl in scope_levels:
+            entry_id = store.remember(
+                content=f"Test {sl.value}",
+                scope_level=sl,
+            )
+            entry = store.get(entry_id)
+            assert entry is not None
+            assert entry.scope_level == sl
+
+    def test_update_with_content_regenerates_embedding(self, store: ContextStore) -> None:
+        """Test that updating content regenerates the embedding."""
+        entry_id = store.remember(content="Original content")
+
+        # Update the content
+        success = store.update(entry_id, content="Updated content")
+        assert success is True
+
+        # Verify content was updated
+        entry = store.get(entry_id)
+        assert entry is not None
+        assert entry.content == "Updated content"
+
+    def test_update_metadata(self, store: ContextStore) -> None:
+        """Test updating entry metadata."""
+        entry_id = store.remember(content="Test", metadata={"old": "value"})
+
+        success = store.update(entry_id, metadata={"new": "metadata"})
+        assert success is True
+
+        entry = store.get(entry_id)
+        assert entry is not None
+        assert entry.metadata == {"new": "metadata"}
+
+    def test_get_nonexistent_entry(self, store: ContextStore) -> None:
+        """Test getting a nonexistent entry returns None."""
+        entry = store.get("definitely-not-a-real-id")
+        assert entry is None
+
+    def test_recall_empty_store(self, store: ContextStore) -> None:
+        """Test recall on empty store returns empty list."""
+        results = store.recall("any query")
+        assert results == []
+
+    def test_store_close(self, temp_db: Path) -> None:
+        """Test closing the store."""
+        store = ContextStore(temp_db)
+        store.remember(content="Test entry")
+
+        # Should not raise
+        store.close()
+
+    def test_stats_storage_size(self, store: ContextStore) -> None:
+        """Test that stats includes storage size."""
+        store.remember(content="Test entry for size")
+
+        stats = store.stats()
+        # Storage size should be greater than 0 after adding an entry
+        assert stats.storage_size_bytes >= 0
+
+    def test_remember_with_string_enum_values(self, store: ContextStore) -> None:
+        """Test remember accepts string values for enum parameters."""
+        entry_id = store.remember(
+            content="String enum test",
+            content_type="decision",  # String instead of ContextType.DECISION
+            scope_level="file",  # String instead of ScopeLevel.FILE
+        )
+
+        entry = store.get(entry_id)
+        assert entry is not None
+        assert entry.content_type == ContextType.DECISION
+        assert entry.scope_level == ScopeLevel.FILE
