@@ -1,18 +1,13 @@
 """Tests for retrieval engine module."""
 
-import math
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from enyal.core.retrieval import RetrievalEngine
 from enyal.models.context import (
     ContextEntry,
-    ContextSearchResult,
     ContextType,
     ScopeLevel,
 )
@@ -157,7 +152,7 @@ class TestSearch:
         # Score should be calculated from combined weights
         assert results[0].score > 0
 
-    def test_search_respects_limit(self, sample_entry: ContextEntry) -> None:
+    def test_search_respects_limit(self) -> None:
         """Test that search respects the limit parameter."""
         # Create multiple entries
         entries = []

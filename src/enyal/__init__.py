@@ -2,8 +2,8 @@
 
 __version__ = "0.1.0"
 
-from enyal.core.store import ContextStore
 from enyal.core.retrieval import RetrievalEngine
+from enyal.core.store import ContextStore
 from enyal.models.context import ContextEntry, ContextType, ScopeLevel
 
 __all__ = [

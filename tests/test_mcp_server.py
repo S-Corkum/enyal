@@ -2,8 +2,6 @@
 
 import os
 import sys
-from datetime import datetime
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +12,6 @@ from enyal.models.context import (
     ContextStats,
     ContextType,
     ScopeLevel,
-    SourceType,
 )
 
 
@@ -43,6 +40,7 @@ def server_module():
         mock_mcp.tool.return_value = lambda f: f
 
         import enyal.mcp.server as server_module
+
         yield server_module
 
         # Reset the module-level globals
@@ -67,15 +65,17 @@ class TestGetStore:
 
     def test_get_store_uses_env_var(self, server_module) -> None:
         """Test that get_store uses ENYAL_DB_PATH env var."""
-        with patch.dict(os.environ, {"ENYAL_DB_PATH": "/custom/db/path.db"}):
-            with patch.object(server_module, "ContextStore") as mock_store_class:
-                mock_store = MagicMock()
-                mock_store_class.return_value = mock_store
-                server_module._store = None
+        with (
+            patch.dict(os.environ, {"ENYAL_DB_PATH": "/custom/db/path.db"}),
+            patch.object(server_module, "ContextStore") as mock_store_class,
+        ):
+            mock_store = MagicMock()
+            mock_store_class.return_value = mock_store
+            server_module._store = None
 
-                result = server_module.get_store()
+            server_module.get_store()
 
-                mock_store_class.assert_called_once_with("/custom/db/path.db")
+            mock_store_class.assert_called_once_with("/custom/db/path.db")
 
     def test_get_store_caches_instance(self, server_module) -> None:
         """Test that get_store returns cached instance on subsequent calls."""
@@ -97,33 +97,37 @@ class TestGetRetrieval:
 
     def test_get_retrieval_initialization(self, server_module) -> None:
         """Test that get_retrieval initializes and returns a retrieval engine."""
-        with patch.object(server_module, "ContextStore"):
-            with patch.object(server_module, "RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval_class.return_value = mock_retrieval
-                server_module._store = None
-                server_module._retrieval = None
+        with (
+            patch.object(server_module, "ContextStore"),
+            patch.object(server_module, "RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval_class.return_value = mock_retrieval
+            server_module._store = None
+            server_module._retrieval = None
 
-                result = server_module.get_retrieval()
+            result = server_module.get_retrieval()
 
-                mock_retrieval_class.assert_called_once()
-                assert result == mock_retrieval
+            mock_retrieval_class.assert_called_once()
+            assert result == mock_retrieval
 
     def test_get_retrieval_caches_instance(self, server_module) -> None:
         """Test that get_retrieval returns cached instance on subsequent calls."""
-        with patch.object(server_module, "ContextStore"):
-            with patch.object(server_module, "RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval_class.return_value = mock_retrieval
-                server_module._store = None
-                server_module._retrieval = None
+        with (
+            patch.object(server_module, "ContextStore"),
+            patch.object(server_module, "RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval_class.return_value = mock_retrieval
+            server_module._store = None
+            server_module._retrieval = None
 
-                result1 = server_module.get_retrieval()
-                result2 = server_module.get_retrieval()
+            result1 = server_module.get_retrieval()
+            result2 = server_module.get_retrieval()
 
-                # Should only be called once due to caching
-                mock_retrieval_class.assert_called_once()
-                assert result1 is result2
+            # Should only be called once due to caching
+            mock_retrieval_class.assert_called_once()
+            assert result1 is result2
 
 
 class TestRememberInput:
@@ -529,7 +533,9 @@ class TestEnyalGet:
             assert result["entry"]["content"] == "Test content for unit tests"
             assert result["entry"]["type"] == "fact"
 
-    def test_enyal_get_with_source(self, server_module, sample_entry_with_source: ContextEntry) -> None:
+    def test_enyal_get_with_source(
+        self, server_module, sample_entry_with_source: ContextEntry
+    ) -> None:
         """Test get with entry that has source information."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()

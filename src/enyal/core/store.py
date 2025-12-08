@@ -6,10 +6,11 @@ import os
 import sqlite3
 import struct
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -153,7 +154,7 @@ class ContextStore:
         return self._local.conn
 
     @contextmanager
-    def _read_transaction(self) -> Generator[sqlite3.Connection, None, None]:
+    def _read_transaction(self) -> Generator[sqlite3.Connection]:
         """Context manager for read transactions (no locking needed with WAL)."""
         conn = self._get_connection()
         try:
@@ -162,7 +163,7 @@ class ContextStore:
             pass  # No commit needed for reads
 
     @contextmanager
-    def _write_transaction(self) -> Generator[sqlite3.Connection, None, None]:
+    def _write_transaction(self) -> Generator[sqlite3.Connection]:
         """Context manager for write transactions (serialized with lock)."""
         with self._write_lock:
             conn = self._get_connection()
@@ -204,10 +205,14 @@ class ContextStore:
         """
         entry = ContextEntry(
             content=content,
-            content_type=ContextType(content_type) if isinstance(content_type, str) else content_type,
+            content_type=ContextType(content_type)
+            if isinstance(content_type, str)
+            else content_type,
             scope_level=ScopeLevel(scope_level) if isinstance(scope_level, str) else scope_level,
             scope_path=scope_path,
-            source_type=SourceType(source_type) if isinstance(source_type, str) and source_type else None,
+            source_type=SourceType(source_type)
+            if isinstance(source_type, str) and source_type
+            else None,
             source_ref=source_ref,
             tags=tags or [],
             metadata=metadata or {},
@@ -331,7 +336,7 @@ class ContextStore:
             # Fetch matching entries
             query_sql = f"""
                 SELECT * FROM context_entries
-                WHERE {' AND '.join(conditions)}
+                WHERE {" AND ".join(conditions)}
             """
             rows = conn.execute(query_sql, params).fetchall()
 
@@ -343,7 +348,7 @@ class ContextStore:
                     f"""
                     UPDATE context_entries
                     SET accessed_at = ?, access_count = access_count + 1
-                    WHERE id IN ({','.join('?' * len(accessed_ids))})
+                    WHERE id IN ({",".join("?" * len(accessed_ids))})
                     """,
                     [now, *accessed_ids],
                 )
@@ -360,11 +365,13 @@ class ContextStore:
                 # Using 1 / (1 + distance) to normalize to 0-1 range
                 score = 1.0 / (1.0 + distance)
 
-                results.append({
-                    "entry": self._row_to_entry(row_dict),
-                    "distance": distance,
-                    "score": score,
-                })
+                results.append(
+                    {
+                        "entry": self._row_to_entry(row_dict),
+                        "distance": distance,
+                        "score": score,
+                    }
+                )
 
             # Sort by score and limit
             results.sort(key=lambda x: x["score"], reverse=True)
@@ -405,9 +412,7 @@ class ContextStore:
             The entry if found, None otherwise.
         """
         with self._read_transaction() as conn:
-            row = conn.execute(
-                "SELECT * FROM context_entries WHERE id = ?", (entry_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM context_entries WHERE id = ?", (entry_id,)).fetchone()
 
             if row:
                 return self._row_to_entry(dict(row))
@@ -501,17 +506,16 @@ class ContextStore:
                 by_scope[row["scope_level"]] = row["cnt"]
 
             # Average confidence
-            avg_conf = conn.execute(
-                "SELECT AVG(confidence) FROM context_entries WHERE is_deprecated = 0"
-            ).fetchone()[0] or 0.0
+            avg_conf = (
+                conn.execute(
+                    "SELECT AVG(confidence) FROM context_entries WHERE is_deprecated = 0"
+                ).fetchone()[0]
+                or 0.0
+            )
 
             # Date range
-            oldest = conn.execute(
-                "SELECT MIN(created_at) FROM context_entries"
-            ).fetchone()[0]
-            newest = conn.execute(
-                "SELECT MAX(created_at) FROM context_entries"
-            ).fetchone()[0]
+            oldest = conn.execute("SELECT MIN(created_at) FROM context_entries").fetchone()[0]
+            newest = conn.execute("SELECT MAX(created_at) FROM context_entries").fetchone()[0]
 
             # Storage size
             storage_size = os.path.getsize(self.db_path) if self.db_path.exists() else 0

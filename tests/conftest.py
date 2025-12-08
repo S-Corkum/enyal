@@ -1,9 +1,10 @@
 """Shared pytest fixtures for Enyal tests."""
 
 import tempfile
+from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -21,7 +22,7 @@ from enyal.models.context import (
 
 
 @pytest.fixture
-def temp_db() -> Generator[Path, None, None]:
+def temp_db() -> Generator[Path]:
     """Create a temporary database path for tests."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir) / "test.db"
@@ -34,7 +35,7 @@ def mock_embedding() -> NDArray[np.float32]:
 
 
 @pytest.fixture
-def mock_embedding_engine(mock_embedding: NDArray[np.float32]) -> Generator[MagicMock, None, None]:
+def mock_embedding_engine(mock_embedding: NDArray[np.float32]) -> Generator[MagicMock]:
     """Mock the EmbeddingEngine to avoid model loading in tests."""
     with patch("enyal.embeddings.engine.EmbeddingEngine") as mock_class:
         mock_instance = mock_class

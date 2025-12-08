@@ -3,7 +3,6 @@
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from enyal.core.store import ContextStore
 from enyal.models.context import (

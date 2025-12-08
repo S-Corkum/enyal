@@ -3,9 +3,6 @@
 import argparse
 import json
 import os
-import tempfile
-from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,32 +30,36 @@ class TestGetStore:
 
     def test_get_store_default_path(self) -> None:
         """Test get_store with default path."""
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("enyal.cli.main.ContextStore") as mock_store_class:
-                mock_store_class.return_value = MagicMock()
-                store = get_store()
-                mock_store_class.assert_called_once_with("~/.enyal/context.db")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("enyal.cli.main.ContextStore") as mock_store_class,
+        ):
+            mock_store_class.return_value = MagicMock()
+            get_store()
+            mock_store_class.assert_called_once_with("~/.enyal/context.db")
 
     def test_get_store_custom_path(self) -> None:
         """Test get_store with custom path."""
         with patch("enyal.cli.main.ContextStore") as mock_store_class:
             mock_store_class.return_value = MagicMock()
-            store = get_store("/custom/path/to/db")
+            get_store("/custom/path/to/db")
             mock_store_class.assert_called_once_with("/custom/path/to/db")
 
     def test_get_store_env_var_path(self) -> None:
         """Test get_store uses environment variable."""
-        with patch.dict(os.environ, {"ENYAL_DB_PATH": "/env/path/db"}, clear=True):
-            with patch("enyal.cli.main.ContextStore") as mock_store_class:
-                mock_store_class.return_value = MagicMock()
-                store = get_store()
-                mock_store_class.assert_called_once_with("/env/path/db")
+        with (
+            patch.dict(os.environ, {"ENYAL_DB_PATH": "/env/path/db"}, clear=True),
+            patch("enyal.cli.main.ContextStore") as mock_store_class,
+        ):
+            mock_store_class.return_value = MagicMock()
+            get_store()
+            mock_store_class.assert_called_once_with("/env/path/db")
 
 
 class TestCmdRemember:
     """Tests for cmd_remember function."""
 
-    def test_cmd_remember_basic(self, sample_entry: ContextEntry) -> None:
+    def test_cmd_remember_basic(self) -> None:
         """Test basic remember command."""
         args = argparse.Namespace(
             content="Test content",
@@ -160,17 +161,19 @@ class TestCmdRecall:
 
         mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
 
-        with patch("enyal.cli.main.get_store") as mock_get_store:
-            with patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval.search.return_value = [mock_result]
-                mock_retrieval_class.return_value = mock_retrieval
+        with (
+            patch("enyal.cli.main.get_store"),
+            patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = [mock_result]
+            mock_retrieval_class.return_value = mock_retrieval
 
-                result = cmd_recall(args)
+            result = cmd_recall(args)
 
-                assert result == 0
-                captured = capsys.readouterr()
-                assert "Test content" in captured.out
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "Test content" in captured.out
 
     def test_cmd_recall_no_results(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Test recall command with no results."""
@@ -185,17 +188,19 @@ class TestCmdRecall:
             json=False,
         )
 
-        with patch("enyal.cli.main.get_store"):
-            with patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval.search.return_value = []
-                mock_retrieval_class.return_value = mock_retrieval
+        with (
+            patch("enyal.cli.main.get_store"),
+            patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = []
+            mock_retrieval_class.return_value = mock_retrieval
 
-                result = cmd_recall(args)
+            result = cmd_recall(args)
 
-                assert result == 0
-                captured = capsys.readouterr()
-                assert "No results found" in captured.out
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "No results found" in captured.out
 
     def test_cmd_recall_json_output(
         self, sample_entry: ContextEntry, capsys: pytest.CaptureFixture[str]
@@ -214,24 +219,24 @@ class TestCmdRecall:
 
         mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
 
-        with patch("enyal.cli.main.get_store"):
-            with patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval.search.return_value = [mock_result]
-                mock_retrieval_class.return_value = mock_retrieval
+        with (
+            patch("enyal.cli.main.get_store"),
+            patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = [mock_result]
+            mock_retrieval_class.return_value = mock_retrieval
 
-                result = cmd_recall(args)
+            result = cmd_recall(args)
 
-                assert result == 0
-                captured = capsys.readouterr()
-                output = json.loads(captured.out)
-                assert isinstance(output, list)
-                assert len(output) == 1
-                assert output[0]["content"] == "Test content for unit tests"
+            assert result == 0
+            captured = capsys.readouterr()
+            output = json.loads(captured.out)
+            assert isinstance(output, list)
+            assert len(output) == 1
+            assert output[0]["content"] == "Test content for unit tests"
 
-    def test_cmd_recall_with_filters(
-        self, sample_entry: ContextEntry, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_cmd_recall_with_filters(self, sample_entry: ContextEntry) -> None:
         """Test recall command with scope and type filters."""
         args = argparse.Namespace(
             query="test query",
@@ -246,23 +251,25 @@ class TestCmdRecall:
 
         mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
 
-        with patch("enyal.cli.main.get_store"):
-            with patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class:
-                mock_retrieval = MagicMock()
-                mock_retrieval.search.return_value = [mock_result]
-                mock_retrieval_class.return_value = mock_retrieval
+        with (
+            patch("enyal.cli.main.get_store"),
+            patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = [mock_result]
+            mock_retrieval_class.return_value = mock_retrieval
 
-                result = cmd_recall(args)
+            result = cmd_recall(args)
 
-                assert result == 0
-                mock_retrieval.search.assert_called_once_with(
-                    query="test query",
-                    limit=5,
-                    scope_level=ScopeLevel.PROJECT,
-                    scope_path="/test/path",
-                    content_type=ContextType.FACT,
-                    min_confidence=0.5,
-                )
+            assert result == 0
+            mock_retrieval.search.assert_called_once_with(
+                query="test query",
+                limit=5,
+                scope_level=ScopeLevel.PROJECT,
+                scope_path="/test/path",
+                content_type=ContextType.FACT,
+                min_confidence=0.5,
+            )
 
 
 class TestCmdForget:
@@ -516,105 +523,118 @@ class TestMainEntrypoint:
         """Test main function with remember command."""
         test_args = ["remember", "Test content"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store") as mock_get_store:
-                mock_store = MagicMock()
-                mock_store.remember.return_value = "test-id"
-                mock_get_store.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
+            mock_store.remember.return_value = "test-id"
+            mock_get_store.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
-                mock_store.remember.assert_called_once()
+            assert result == 0
+            mock_store.remember.assert_called_once()
 
     def test_main_recall_command(self) -> None:
         """Test main function with recall command."""
         test_args = ["recall", "test query"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store"):
-                with patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class:
-                    mock_retrieval = MagicMock()
-                    mock_retrieval.search.return_value = []
-                    mock_retrieval_class.return_value = mock_retrieval
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store"),
+            patch("enyal.cli.main.RetrievalEngine") as mock_retrieval_class,
+        ):
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = []
+            mock_retrieval_class.return_value = mock_retrieval
 
-                    result = main()
+            result = main()
 
-                    assert result == 0
+            assert result == 0
 
     def test_main_no_command(self) -> None:
         """Test main function with no command raises error."""
-        with patch("sys.argv", ["enyal"]):
-            with pytest.raises(SystemExit):
-                main()
+        with patch("sys.argv", ["enyal"]), pytest.raises(SystemExit):
+            main()
 
     def test_main_stats_command(self, sample_stats: ContextStats) -> None:
         """Test main function with stats command."""
         test_args = ["stats"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store") as mock_get_store:
-                mock_store = MagicMock()
-                mock_store.stats.return_value = sample_stats
-                mock_get_store.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
+            mock_store.stats.return_value = sample_stats
+            mock_get_store.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
+            assert result == 0
 
     def test_main_get_command(self, sample_entry: ContextEntry) -> None:
         """Test main function with get command."""
         test_args = ["get", "test-entry-id"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store") as mock_get_store:
-                mock_store = MagicMock()
-                mock_store.get.return_value = sample_entry
-                mock_get_store.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
+            mock_store.get.return_value = sample_entry
+            mock_get_store.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
+            assert result == 0
 
     def test_main_forget_command(self) -> None:
         """Test main function with forget command."""
         test_args = ["forget", "test-entry-id"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store") as mock_get_store:
-                mock_store = MagicMock()
-                mock_store.forget.return_value = True
-                mock_get_store.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
+            mock_store.forget.return_value = True
+            mock_get_store.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
+            assert result == 0
 
     def test_main_with_global_db_flag(self, sample_stats: ContextStats) -> None:
         """Test main function with --db flag."""
         test_args = ["--db", "/custom/path.db", "stats"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.ContextStore") as mock_store_class:
-                mock_store = MagicMock()
-                mock_store.stats.return_value = sample_stats
-                mock_store_class.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.ContextStore") as mock_store_class,
+        ):
+            mock_store = MagicMock()
+            mock_store.stats.return_value = sample_stats
+            mock_store_class.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
-                mock_store_class.assert_called_with("/custom/path.db")
+            assert result == 0
+            mock_store_class.assert_called_with("/custom/path.db")
 
     def test_main_with_json_flag(self, sample_stats: ContextStats) -> None:
         """Test main function with --json flag."""
         test_args = ["--json", "stats"]
 
-        with patch("sys.argv", ["enyal", *test_args]):
-            with patch("enyal.cli.main.get_store") as mock_get_store:
-                mock_store = MagicMock()
-                mock_store.stats.return_value = sample_stats
-                mock_get_store.return_value = mock_store
+        with (
+            patch("sys.argv", ["enyal", *test_args]),
+            patch("enyal.cli.main.get_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
+            mock_store.stats.return_value = sample_stats
+            mock_get_store.return_value = mock_store
 
-                result = main()
+            result = main()
 
-                assert result == 0
+            assert result == 0

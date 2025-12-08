@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from numpy.typing import NDArray
 
 from enyal.embeddings.engine import EmbeddingEngine
 

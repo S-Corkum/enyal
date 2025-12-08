@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
 from enyal.core.retrieval import RetrievalEngine
 from enyal.core.store import ContextStore

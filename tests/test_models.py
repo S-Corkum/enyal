@@ -87,7 +87,7 @@ class TestContextSearchResult:
         entry = ContextEntry(content="Test")
         result = ContextSearchResult(entry=entry, distance=0.5, score=0.8)
 
-        with pytest.raises(Exception):  # ValidationError for frozen model
+        with pytest.raises(TypeError):  # Pydantic frozen models raise TypeError
             result.score = 0.9  # type: ignore[misc]
 
 
