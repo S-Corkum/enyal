@@ -8,7 +8,7 @@ import struct
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -342,7 +342,7 @@ class ContextStore:
             rows = conn.execute(query_sql, params).fetchall()
 
             # Update access timestamps
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(UTC).replace(tzinfo=None).isoformat()
             accessed_ids = [dict(r)["id"] for r in rows]
             if accessed_ids:
                 conn.execute(
@@ -397,7 +397,7 @@ class ContextStore:
             else:
                 result = conn.execute(
                     "UPDATE context_entries SET is_deprecated = 1, updated_at = ? WHERE id = ?",
-                    (datetime.utcnow().isoformat(), entry_id),
+                    (datetime.now(UTC).replace(tzinfo=None).isoformat(), entry_id),
                 )
 
             return result.rowcount > 0
@@ -441,7 +441,7 @@ class ContextStore:
             True if entry was found and updated.
         """
         updates = ["updated_at = ?"]
-        params: list[Any] = [datetime.utcnow().isoformat()]
+        params: list[Any] = [datetime.now(UTC).replace(tzinfo=None).isoformat()]
 
         if content is not None:
             updates.append("content = ?")

@@ -1,7 +1,7 @@
 """Tests for retrieval engine module."""
 
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -278,7 +278,7 @@ class TestEffectiveConfidence:
         engine = RetrievalEngine(mock_store)
 
         # Just created entry
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         confidence = engine._calculate_effective_confidence(
             base_confidence=0.9,
             updated_at=now,
@@ -295,7 +295,7 @@ class TestEffectiveConfidence:
         engine = RetrievalEngine(mock_store, confidence_half_life_days=90)
 
         # Entry from 90 days ago (half-life)
-        old_date = datetime.utcnow() - timedelta(days=90)
+        old_date = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=90)
         confidence = engine._calculate_effective_confidence(
             base_confidence=0.8,
             updated_at=old_date,
@@ -311,7 +311,7 @@ class TestEffectiveConfidence:
         mock_store = MagicMock()
         engine = RetrievalEngine(mock_store)
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
 
         # Entry with many accesses
         confidence_high_access = engine._calculate_effective_confidence(
@@ -335,7 +335,7 @@ class TestEffectiveConfidence:
         mock_store = MagicMock()
         engine = RetrievalEngine(mock_store)
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
 
         # Entry with max confidence and many accesses
         confidence = engine._calculate_effective_confidence(

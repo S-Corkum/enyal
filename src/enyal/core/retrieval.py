@@ -1,7 +1,7 @@
 """Retrieval engine with hybrid search (semantic + keyword + recency)."""
 
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from enyal.core.store import ContextStore
@@ -90,7 +90,7 @@ class RetrievalEngine:
             return []
 
         # Calculate combined scores
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         results = []
 
         for result in semantic_results:
@@ -204,7 +204,7 @@ class RetrievalEngine:
         Returns:
             Effective confidence score (0-1).
         """
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         days_since_update = (now - updated_at).days
 
         # Exponential decay with half-life

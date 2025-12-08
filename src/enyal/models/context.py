@@ -1,11 +1,16 @@
 """Data models for context entries."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def _utc_now() -> datetime:
+    """Return current UTC time as a naive datetime (for backward compatibility)."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class ContextType(StrEnum):
@@ -45,8 +50,8 @@ class ContextEntry(BaseModel):
     scope_level: ScopeLevel = Field(default=ScopeLevel.PROJECT)
     scope_path: str | None = Field(default=None, description="Path for non-global scopes")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
+    updated_at: datetime = Field(default_factory=_utc_now)
     accessed_at: datetime | None = Field(default=None)
     access_count: int = Field(default=0, ge=0)
     source_type: SourceType | None = Field(default=None)
