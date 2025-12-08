@@ -31,13 +31,13 @@ jobs:
         run: uv python install 3.12
 
       - name: Install build dependencies
-        run: uv pip install build twine --system
+        run: uv pip install build twine
 
       - name: Build sdist and wheel
-        run: python -m build
+        run: uv run python -m build
 
       - name: Check distribution with twine
-        run: twine check dist/*
+        run: uv run twine check dist/*
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
