@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
 from enyal.models.context import (
     ContextEntry,
@@ -87,7 +88,7 @@ class TestContextSearchResult:
         entry = ContextEntry(content="Test")
         result = ContextSearchResult(entry=entry, distance=0.5, score=0.8)
 
-        with pytest.raises(TypeError):  # Pydantic frozen models raise TypeError
+        with pytest.raises(ValidationError):  # Pydantic frozen models raise ValidationError
             result.score = 0.9  # type: ignore[misc]
 
 
