@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP(
     name="enyal",
-    version="0.1.0",
-    description="Persistent, queryable memory for AI coding agents",
 )
 
 # Global store instance (initialized lazily)

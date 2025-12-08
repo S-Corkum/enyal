@@ -125,7 +125,7 @@ class ContextStore:
             # Load sqlite-vec extension
             conn.enable_load_extension(True)
             try:
-                import sqlite_vec
+                import sqlite_vec  # type: ignore[import-untyped]
 
                 sqlite_vec.load(conn)
             except Exception as e:
@@ -139,19 +139,20 @@ class ContextStore:
     def _get_connection(self) -> sqlite3.Connection:
         """Get a thread-local database connection."""
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(
+            new_conn = sqlite3.connect(
                 str(self.db_path),
                 check_same_thread=False,
                 timeout=30.0,
             )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return self._local.conn
+            new_conn.row_factory = sqlite3.Row
+            new_conn.execute("PRAGMA journal_mode=WAL")
+            new_conn.execute("PRAGMA busy_timeout=5000")
+            new_conn.execute("PRAGMA synchronous=NORMAL")
+            new_conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+            new_conn.execute("PRAGMA foreign_keys=ON")
+            self._local.conn = new_conn
+        result: sqlite3.Connection = self._local.conn
+        return result
 
     @contextmanager
     def _read_transaction(self) -> Generator[sqlite3.Connection]:

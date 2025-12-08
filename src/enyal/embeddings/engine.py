@@ -1,10 +1,13 @@
 """Embedding engine for generating text embeddings."""
 
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +20,12 @@ class EmbeddingEngine:
     for operations that don't require embeddings.
     """
 
-    _model: ClassVar[object | None] = None
+    _model: ClassVar["SentenceTransformer | None"] = None
     _model_name: ClassVar[str] = "all-MiniLM-L6-v2"
     _embedding_dim: ClassVar[int] = 384
 
     @classmethod
-    def get_model(cls) -> object:
+    def get_model(cls) -> "SentenceTransformer":
         """
         Get the sentence transformer model, loading it if necessary.
 
@@ -49,8 +52,9 @@ class EmbeddingEngine:
             A 384-dimensional float32 numpy array.
         """
         model = cls.get_model()
-        embedding = model.encode(text, convert_to_numpy=True)  # type: ignore[union-attr]
-        return embedding.astype(np.float32)
+        embedding: Any = model.encode(text, convert_to_numpy=True)
+        result: NDArray[np.float32] = embedding.astype(np.float32)
+        return result
 
     @classmethod
     def embed_batch(cls, texts: list[str], batch_size: int = 32) -> NDArray[np.float32]:
@@ -68,13 +72,14 @@ class EmbeddingEngine:
             return np.array([], dtype=np.float32).reshape(0, cls._embedding_dim)
 
         model = cls.get_model()
-        embeddings = model.encode(  # type: ignore[union-attr]
+        embeddings: Any = model.encode(
             texts,
             convert_to_numpy=True,
             batch_size=batch_size,
             show_progress_bar=len(texts) > 100,
         )
-        return embeddings.astype(np.float32)
+        result: NDArray[np.float32] = embeddings.astype(np.float32)
+        return result
 
     @classmethod
     def embedding_dimension(cls) -> int:

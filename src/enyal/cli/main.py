@@ -338,7 +338,8 @@ def main() -> int:
     serve_parser.set_defaults(func=cmd_serve)
 
     args = parser.parse_args()
-    return args.func(args)
+    result: int = args.func(args)
+    return result
 
 
 if __name__ == "__main__":
