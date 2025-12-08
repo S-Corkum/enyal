@@ -1,6 +1,6 @@
 [project]
 name = "enyal"
-version = "0.1.1"
+version = "0.1.2"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -19,19 +19,20 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
 ]
 
 dependencies = [
     "fastmcp>=2.0.0",
-    "sentence-transformers>=3.0.0",
     "sqlite-vec>=0.1.0",
     "pydantic>=2.0.0",
+    # sentence-transformers handles torch as transitive dependency
+    "sentence-transformers>=3.0.0",
     # NumPy: 2.0+ for Python 3.13, 1.26.x for Python 3.11-3.12
     "numpy>=2.0.0; python_version >= '3.13'",
     "numpy>=1.26.0,<2.0.0; python_version < '3.13'",
-    # PyTorch: 2.6+ for Python 3.13, 2.0-2.2.2 for Python 3.11-3.12 (macOS Intel compat)
-    "torch>=2.6.0; python_version >= '3.13'",
-    "torch>=2.0.0,<=2.2.2; python_version < '3.13'",
 ]
 
 [project.optional-dependencies]
@@ -115,7 +116,5 @@ exclude_lines = [
 ]
 
 [tool.uv]
-# Exclude macOS Intel (x86_64) with Python 3.13+ since PyTorch 2.6+ doesn't support it
-environments = [
-    "sys_platform != 'darwin' or platform_machine != 'x86_64' or python_version < '3.13'",
-]
+# Note: macOS Intel + Python 3.13 is not supported due to PyTorch ecosystem constraints.
+# Users on macOS Intel should use: uvx --python 3.12 enyal serve

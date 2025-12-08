@@ -10,7 +10,7 @@ Enyal gives AI agents like Claude Code durable context that survives session res
 - **Semantic Search**: Find relevant context using natural language queries (384-dim embeddings via all-MiniLM-L6-v2)
 - **Hierarchical Scoping**: Global → workspace → project → file context inheritance
 - **Fully Offline**: Zero network calls during operation
-- **Cross-Platform**: macOS (Intel + Apple Silicon) and Windows 10/11
+- **Cross-Platform**: macOS (Intel + Apple Silicon), Linux, and Windows
 - **MCP Compatible**: Works with Claude Code, Cursor, Windsurf, Kiro, and any MCP client
 
 ## Quick Start
@@ -20,20 +20,36 @@ Get up and running in under 2 minutes:
 ### 1. Install
 
 ```bash
+# Using uvx (recommended - no installation needed)
+uvx enyal serve
+
+# Or install with pip
 pip install enyal
 ```
 
-### 2. Configure Your IDE
+### 2. Configure Your MCP Client
 
-Create a configuration file for your IDE (all use the same format):
+**Universal configuration** (works with Claude Code, Cursor, Windsurf, Kiro):
 
-**Claude Code** — Create `.mcp.json` in your project root:
 ```json
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"]
+      "command": "uvx",
+      "args": ["enyal", "serve"]
+    }
+  }
+}
+```
+
+**For macOS Intel users** (requires Python 3.11 or 3.12):
+
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "enyal", "serve"]
     }
   }
 }
@@ -43,13 +59,49 @@ Create a configuration file for your IDE (all use the same format):
 
 ```
 You: Remember that this project uses pytest for all testing
-Assistant: [calls enyal_remember] ✓ Stored context about testing framework
+Assistant: [calls enyal_remember] Stored context about testing framework
 
 You: What testing framework should I use?
-Assistant: [calls enyal_recall] Based on the stored context, this project uses pytest for all testing.
+Assistant: [calls enyal_recall] Based on stored context, this project uses pytest.
 ```
 
-## Installation
+## Platform Support
+
+| Platform | Python 3.11 | Python 3.12 | Python 3.13 |
+|----------|-------------|-------------|-------------|
+| macOS Apple Silicon | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+| macOS Intel | `uvx --python 3.11 enyal serve` | `uvx --python 3.12 enyal serve` | Not supported* |
+| Linux | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+| Windows | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+
+*macOS Intel + Python 3.13 is not supported due to PyTorch ecosystem constraints.
+
+## Installation Methods
+
+### Method 1: uvx (Recommended for MCP)
+
+```bash
+# Most platforms (auto-selects Python)
+uvx enyal serve
+
+# macOS Intel (explicit Python version)
+uvx --python 3.12 enyal serve
+
+# With model preloading for faster first query
+uvx enyal serve --preload
+```
+
+### Method 2: pipx
+
+```bash
+# Install globally
+pipx install enyal
+
+# Run server
+enyal serve
+```
+
+### Method 3: pip
 
 ```bash
 # Using uv (recommended)
@@ -58,13 +110,13 @@ uv add enyal
 # Using pip
 pip install enyal
 
-# Using pipx (CLI only)
-pipx install enyal
+# Run server
+enyal serve
 ```
 
 ## MCP Integration
 
-Enyal works with any MCP-compatible client. Configuration is similar across platforms—only the file location differs.
+Enyal works with any MCP-compatible client. The configuration is the same across platforms—only the command may vary for macOS Intel.
 
 ### Claude Code
 
@@ -72,13 +124,28 @@ Enyal works with any MCP-compatible client. Configuration is similar across plat
 - Project: `.mcp.json` (in project root)
 - User: `~/.claude/.mcp.json`
 
-**Configuration:**
+**Standard configuration:**
 ```json
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
+      "env": {
+        "ENYAL_DB_PATH": "~/.enyal/context.db"
+      }
+    }
+  }
+}
+```
+
+**macOS Intel configuration:**
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -89,7 +156,11 @@ Enyal works with any MCP-compatible client. Configuration is similar across plat
 
 **CLI setup:**
 ```bash
-claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"]}'
+# Standard
+claude mcp add-json enyal '{"command":"uvx","args":["enyal","serve"]}'
+
+# macOS Intel
+claude mcp add-json enyal '{"command":"uvx","args":["--python","3.12","enyal","serve"]}'
 ```
 
 ### Claude Desktop
@@ -103,8 +174,8 @@ claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"]}'
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -124,8 +195,8 @@ claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"]}'
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -145,8 +216,8 @@ claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"]}'
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -168,8 +239,8 @@ claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"]}'
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       },
@@ -303,16 +374,28 @@ The default database is stored at `~/.enyal/context.db`. This single SQLite file
 
 ## Troubleshooting
 
+### Installation Fails on macOS Intel
+
+**Symptom:** Error about torch/PyTorch wheels not found
+
+**Cause:** PyTorch doesn't provide wheels for macOS Intel + Python 3.13
+
+**Solution:** Use Python 3.11 or 3.12:
+```bash
+uvx --python 3.12 enyal serve
+```
+
 ### MCP Server Not Connecting
 
-1. **Verify Python path:** Ensure `python` resolves to Python 3.11+
+1. **Check uvx is installed:**
    ```bash
-   python --version
+   uvx --version
    ```
 
-2. **Check installation:** Verify enyal is installed
+2. **Test server manually:**
    ```bash
-   python -c "import enyal; print(enyal.__file__)"
+   uvx enyal serve
+   # Should start without errors, waiting for MCP protocol
    ```
 
 3. **Enable debug logging:**
@@ -320,11 +403,8 @@ The default database is stored at `~/.enyal/context.db`. This single SQLite file
    {
      "mcpServers": {
        "enyal": {
-         "command": "python",
-         "args": ["-m", "enyal.mcp"],
-         "env": {
-           "ENYAL_LOG_LEVEL": "DEBUG"
-         }
+         "command": "uvx",
+         "args": ["enyal", "serve", "--log-level", "DEBUG"]
        }
      }
    }
@@ -340,11 +420,14 @@ The default database is stored at `~/.enyal/context.db`. This single SQLite file
 
 The first query loads the embedding model (~80MB). This takes ~1-2 seconds. Subsequent queries are fast (~34ms).
 
-**To pre-load the model:**
+**To pre-load the model at startup:**
 ```json
 {
-  "env": {
-    "ENYAL_PRELOAD_MODEL": "true"
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["enyal", "serve", "--preload"]
+    }
   }
 }
 ```

@@ -11,8 +11,8 @@ Enyal runs as an MCP server that provides persistent memory capabilities to AI a
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -20,6 +20,32 @@ Enyal runs as an MCP server that provides persistent memory capabilities to AI a
   }
 }
 ```
+
+**For macOS Intel users** (requires Python 3.11 or 3.12):
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "enyal", "serve"],
+      "env": {
+        "ENYAL_DB_PATH": "~/.enyal/context.db"
+      }
+    }
+  }
+}
+```
+
+## Platform Support
+
+| Platform | Python 3.11 | Python 3.12 | Python 3.13 |
+|----------|-------------|-------------|-------------|
+| macOS Apple Silicon | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+| macOS Intel | `uvx --python 3.11 enyal serve` | `uvx --python 3.12 enyal serve` | Not supported* |
+| Linux | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+| Windows | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+
+*macOS Intel + Python 3.13 is not supported due to PyTorch ecosystem constraints.
 
 ---
 
@@ -44,8 +70,8 @@ Create `.mcp.json` in your project root:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -54,16 +80,22 @@ Create `.mcp.json` in your project root:
 }
 ```
 
+**macOS Intel users:** Use `["--python", "3.12", "enyal", "serve"]` for args.
+
 #### Method 2: CLI Command
 
 ```bash
-claude mcp add-json enyal '{"command":"python","args":["-m","enyal.mcp"],"env":{"ENYAL_DB_PATH":"~/.enyal/context.db"}}'
+# Standard
+claude mcp add-json enyal '{"command":"uvx","args":["enyal","serve"],"env":{"ENYAL_DB_PATH":"~/.enyal/context.db"}}'
+
+# macOS Intel
+claude mcp add-json enyal '{"command":"uvx","args":["--python","3.12","enyal","serve"],"env":{"ENYAL_DB_PATH":"~/.enyal/context.db"}}'
 ```
 
 #### Method 3: Interactive CLI
 
 ```bash
-claude mcp add enyal --command python --args "-m" "enyal.mcp"
+claude mcp add enyal --command uvx --args "enyal" "serve"
 ```
 
 ### Verify Installation
@@ -96,16 +128,30 @@ Based on stored context, this project uses TypeScript strict mode...
 
 ### Advanced Configuration
 
-**With OAuth (if using authenticated services):**
+**With debug logging:**
 ```json
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve", "--log-level", "DEBUG"],
       "env": {
-        "ENYAL_DB_PATH": "~/.enyal/context.db",
-        "ENYAL_LOG_LEVEL": "DEBUG"
+        "ENYAL_DB_PATH": "~/.enyal/context.db"
+      }
+    }
+  }
+}
+```
+
+**With model preloading (faster first query):**
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["enyal", "serve", "--preload"],
+      "env": {
+        "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
     }
   }
@@ -117,7 +163,10 @@ Based on stored context, this project uses TypeScript strict mode...
 **Server not appearing:**
 1. Restart Claude Code after adding configuration
 2. Check that the `.mcp.json` file is valid JSON
-3. Verify Python 3.11+ is available: `python --version`
+3. Verify uvx is installed: `uvx --version`
+
+**Installation fails on macOS Intel:**
+Use Python 3.12: `uvx --python 3.12 enyal serve`
 
 **Permission errors:**
 ```bash
@@ -159,8 +208,8 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -181,8 +230,8 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "%USERPROFILE%\\.enyal\\context.db"
       }
@@ -196,19 +245,7 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ### Windows-Specific Notes
 
 - Use `%USERPROFILE%` instead of `~` for home directory
-- Ensure Python is in your system PATH
-- If using a virtual environment, specify the full path to python:
-
-```json
-{
-  "mcpServers": {
-    "enyal": {
-      "command": "C:\\Users\\YourName\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-      "args": ["-m", "enyal.mcp"]
-    }
-  }
-}
-```
+- Ensure uv/uvx is installed: `pip install uv` or see [uv installation](https://docs.astral.sh/uv/getting-started/installation/)
 
 ### Verify Installation
 
@@ -237,8 +274,8 @@ Create `~/.cursor/mcp.json` for global access:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -246,6 +283,8 @@ Create `~/.cursor/mcp.json` for global access:
   }
 }
 ```
+
+**macOS Intel users:** Use `["--python", "3.12", "enyal", "serve"]` for args.
 
 Or create `.cursor/mcp.json` in your project for project-specific access.
 
@@ -304,8 +343,8 @@ Create or edit `~/.codeium/windsurf/mcp_config.json`:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
@@ -313,6 +352,8 @@ Create or edit `~/.codeium/windsurf/mcp_config.json`:
   }
 }
 ```
+
+**macOS Intel users:** Use `["--python", "3.12", "enyal", "serve"]` for args.
 
 #### Method 2: Settings UI
 
@@ -360,8 +401,8 @@ Cascade: [Calls enyal_recall] Based on stored context, you're using FastAPI with
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "${HOME}/.enyal/context.db"
       }
@@ -400,8 +441,8 @@ Create `~/.kiro/settings/mcp.json`:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "${HOME}/.enyal/context.db"
       },
@@ -411,6 +452,8 @@ Create `~/.kiro/settings/mcp.json`:
   }
 }
 ```
+
+**macOS Intel users:** Use `["--python", "3.12", "enyal", "serve"]` for args.
 
 #### Method 2: UI Setup
 
@@ -434,8 +477,8 @@ Kiro supports additional configuration options:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve"],
       "env": {
         "ENYAL_DB_PATH": "${HOME}/.enyal/context.db"
       },
@@ -500,33 +543,36 @@ kiro chat  # Uses same MCP servers
 
 ### Common Issues
 
-#### Python Not Found
+#### Installation Fails on macOS Intel
 
-**Symptom:** MCP server fails to start, "python not found" error
+**Symptom:** Error about torch/PyTorch wheels not found
 
-**Solutions:**
-1. Verify Python 3.11+ is installed: `python --version`
-2. Use full path to Python executable:
-   ```json
-   {
-     "command": "/usr/local/bin/python3"
-   }
-   ```
-3. On Windows, ensure Python is in PATH or use full path:
-   ```json
-   {
-     "command": "C:\\Python312\\python.exe"
-   }
-   ```
+**Cause:** PyTorch doesn't provide wheels for macOS Intel + Python 3.13
 
-#### Enyal Not Installed
+**Solution:** Use Python 3.11 or 3.12:
+```bash
+uvx --python 3.12 enyal serve
+```
 
-**Symptom:** ModuleNotFoundError for enyal
+Update your MCP config to use `["--python", "3.12", "enyal", "serve"]` for args.
+
+#### uvx Not Found
+
+**Symptom:** MCP server fails to start, "uvx not found" error
 
 **Solutions:**
-1. Install enyal: `pip install enyal`
-2. If using virtual environments, ensure the MCP config uses the correct Python
-3. Verify installation: `python -c "import enyal; print('OK')"`
+1. Install uv: `pip install uv` or see [uv installation](https://docs.astral.sh/uv/getting-started/installation/)
+2. On macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+3. On Windows: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
+
+#### Enyal Not Found by uvx
+
+**Symptom:** uvx can't find the enyal package
+
+**Solutions:**
+1. Check PyPI connectivity: `uvx --help`
+2. Try with explicit version: `uvx enyal@0.1.2 serve`
+3. Clear uvx cache: `uv cache clean`
 
 #### Database Permission Errors
 
@@ -577,11 +623,8 @@ Enable debug logging to troubleshoot issues:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
-      "env": {
-        "ENYAL_LOG_LEVEL": "DEBUG"
-      }
+      "command": "uvx",
+      "args": ["enyal", "serve", "--log-level", "DEBUG"]
     }
   }
 }
@@ -633,8 +676,21 @@ Copy-paste ready configuration for any platform:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"]
+      "command": "uvx",
+      "args": ["enyal", "serve"]
+    }
+  }
+}
+```
+
+**macOS Intel users:**
+
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "enyal", "serve"]
     }
   }
 }
@@ -648,12 +704,10 @@ With all options:
 {
   "mcpServers": {
     "enyal": {
-      "command": "python",
-      "args": ["-m", "enyal.mcp"],
+      "command": "uvx",
+      "args": ["enyal", "serve", "--preload", "--log-level", "INFO"],
       "env": {
-        "ENYAL_DB_PATH": "~/.enyal/context.db",
-        "ENYAL_PRELOAD_MODEL": "true",
-        "ENYAL_LOG_LEVEL": "INFO"
+        "ENYAL_DB_PATH": "~/.enyal/context.db"
       }
     }
   }
