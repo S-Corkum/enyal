@@ -20,10 +20,10 @@ Get up and running in under 2 minutes:
 ### 1. Install
 
 ```bash
-# Using uvx (recommended - no installation needed)
-uvx enyal serve
+# Using uv (recommended)
+uv pip install enyal --system
 
-# Or install with pip
+# Or using pip
 pip install enyal
 ```
 
@@ -69,16 +69,51 @@ Assistant: [calls enyal_recall] Based on stored context, this project uses pytes
 
 | Platform | Python 3.11 | Python 3.12 | Python 3.13 |
 |----------|-------------|-------------|-------------|
-| macOS Apple Silicon | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
-| macOS Intel | `uvx --python 3.11 enyal serve` | `uvx --python 3.12 enyal serve` | Not supported* |
-| Linux | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
-| Windows | `uvx enyal serve` | `uvx enyal serve` | `uvx enyal serve` |
+| macOS Apple Silicon | Supported | Supported | Supported |
+| macOS Intel | Supported | Supported | Not supported* |
+| Linux | Supported | Supported | Supported |
+| Windows | Supported | Supported | Supported |
 
 *macOS Intel + Python 3.13 is not supported due to PyTorch ecosystem constraints.
 
 ## Installation Methods
 
-### Method 1: uvx (Recommended for MCP)
+### Method 1: uv (Recommended)
+
+```bash
+# Install globally
+uv pip install enyal --system
+
+# Run server
+enyal serve
+
+# With model preloading for faster first query
+enyal serve --preload
+```
+
+### Method 2: pip
+
+```bash
+# Install globally
+pip install enyal
+
+# Run server
+enyal serve
+```
+
+### Method 3: pipx
+
+```bash
+# Install in isolated environment
+pipx install enyal
+
+# Run server
+enyal serve
+```
+
+### Method 4: uvx (Run without installing)
+
+For ephemeral execution without permanent installation:
 
 ```bash
 # Most platforms (auto-selects Python)
@@ -86,33 +121,9 @@ uvx enyal serve
 
 # macOS Intel (explicit Python version)
 uvx --python 3.12 enyal serve
-
-# With model preloading for faster first query
-uvx enyal serve --preload
 ```
 
-### Method 2: pipx
-
-```bash
-# Install globally
-pipx install enyal
-
-# Run server
-enyal serve
-```
-
-### Method 3: pip
-
-```bash
-# Using uv (recommended)
-uv add enyal
-
-# Using pip
-pip install enyal
-
-# Run server
-enyal serve
-```
+Note: `uvx` runs the package in a temporary environment each time. For persistent installation, use Method 1, 2, or 3.
 
 ## MCP Integration
 
@@ -386,12 +397,13 @@ The default database is stored at `~/.enyal/context.db`. This single SQLite file
 
 **Solution:** Use Python 3.11 or 3.12:
 ```bash
-uvx --python 3.12 enyal serve
+# Install with specific Python version
+uv pip install enyal --python 3.12 --system
 ```
 
 ### MCP Server Not Connecting
 
-1. **Check uvx is installed:**
+1. **Check uvx is available:**
    ```bash
    uvx --version
    ```
