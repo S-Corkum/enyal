@@ -171,7 +171,7 @@ def cmd_model_download(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps({"success": True, "model": model_name, "path": path}))
         else:
-            print(f"\nModel downloaded successfully!")
+            print("\nModel downloaded successfully!")
             print(f"Model: {model_name}")
             print(f"Path: {path}")
             print("\nThe model is now cached and available for offline use.")

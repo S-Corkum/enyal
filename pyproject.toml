@@ -1,6 +1,6 @@
 [project]
 name = "enyal"
-version = "0.1.4"
+version = "0.1.5"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -42,6 +42,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
+    "types-requests>=2.31.0",
 ]
 onnx = [
     "onnxruntime>=1.18.0",
