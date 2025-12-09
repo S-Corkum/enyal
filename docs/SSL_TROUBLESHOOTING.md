@@ -238,16 +238,89 @@ enyal model verify --model /path/to/local/model
 
 ### macOS
 
+macOS stores certificates in the Keychain, not as files. You need to export them first.
+
+#### Option 1: Export Corporate CA from Keychain (Recommended)
+
 ```bash
-# System CA bundle location
+# Step 1: Find your corporate CA certificate name
+# Open Keychain Access → System → Certificates
+# Look for certificates with your company name (e.g., "Zscaler Root CA", "ACME Corp CA")
+
+# Step 2: Export via command line (replace "Your Corporate CA Name" with actual name)
+security find-certificate -c "Your Corporate CA Name" -p > ~/corporate-ca.pem
+
+# Step 3: Verify the export worked
+cat ~/corporate-ca.pem | head -5
+# Should show: -----BEGIN CERTIFICATE-----
+
+# Step 4: Use with Enyal
+export ENYAL_SSL_CERT_FILE=~/corporate-ca.pem
+```
+
+#### Option 2: Export All System Certificates
+
+```bash
+# Export ALL certificates from System Keychain (includes corporate CAs)
+security find-certificate -a -p /Library/Keychains/System.keychain > ~/all-system-certs.pem
+
+# Also include the system roots
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >> ~/all-system-certs.pem
+
+# Use the combined bundle
+export ENYAL_SSL_CERT_FILE=~/all-system-certs.pem
+```
+
+#### Option 3: Export via Keychain Access GUI
+
+1. Open **Keychain Access** (Applications → Utilities → Keychain Access)
+2. Select **System** keychain in the sidebar
+3. Click **Certificates** category
+4. Find your corporate CA certificate (often named after your company or proxy vendor)
+5. Right-click → **Export "Certificate Name"...**
+6. Save as `.pem` format (Privacy Enhanced Mail)
+7. Use the exported file:
+   ```bash
+   export ENYAL_SSL_CERT_FILE=/path/to/exported-cert.pem
+   ```
+
+#### Option 4: Combine with System Bundle
+
+If you need both the corporate CA and standard CAs:
+
+```bash
+# Start with system CAs
+cp /etc/ssl/cert.pem ~/combined-ca-bundle.pem
+
+# Add your corporate CA
+security find-certificate -c "Your Corporate CA Name" -p >> ~/combined-ca-bundle.pem
+
+# Use combined bundle
+export ENYAL_SSL_CERT_FILE=~/combined-ca-bundle.pem
+```
+
+#### Finding Your Corporate CA Name
+
+Not sure what your corporate CA is called? Try:
+
+```bash
+# List all certificates in System keychain
+security find-certificate -a /Library/Keychains/System.keychain | grep "alis" | head -20
+
+# Or check what's intercepting HTTPS (requires curl with verbose)
+curl -v https://huggingface.co 2>&1 | grep -i "issuer"
+```
+
+#### System CA Bundle Locations
+
+```bash
+# Default macOS system bundle (may not include corporate CAs)
 /etc/ssl/cert.pem
 
-# If using Homebrew OpenSSL
+# Homebrew OpenSSL (if installed)
 /usr/local/etc/openssl/cert.pem
 /usr/local/etc/openssl@1.1/cert.pem
-
-# Export certificates from Keychain
-security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > ~/corporate-certs.pem
+/opt/homebrew/etc/openssl@3/cert.pem  # Apple Silicon
 ```
 
 ### Linux (Debian/Ubuntu)
