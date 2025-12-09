@@ -364,6 +364,10 @@ print(f"Total entries: {stats.total_entries}")
 | `ENYAL_DB_PATH` | `~/.enyal/context.db` | Database file location |
 | `ENYAL_PRELOAD_MODEL` | `false` | Pre-load embedding model at startup |
 | `ENYAL_LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `ENYAL_SSL_CERT_FILE` | (system) | Path to CA certificate bundle (for corporate networks) |
+| `ENYAL_SSL_VERIFY` | `true` | Enable/disable SSL verification (set `false` only as last resort) |
+| `ENYAL_MODEL_PATH` | (none) | Path to local pre-downloaded model |
+| `ENYAL_OFFLINE_MODE` | `false` | Prevent network calls (use with cached/local model) |
 
 ### Database Location
 
@@ -443,6 +447,44 @@ On macOS/Linux, ensure the database directory exists and is writable:
 mkdir -p ~/.enyal
 chmod 755 ~/.enyal
 ```
+
+### SSL Certificate Errors (Corporate Networks)
+
+**Symptom:** Error containing "SSL: CERTIFICATE_VERIFY_FAILED" or "self signed certificate in certificate chain"
+
+**Cause:** Corporate networks with SSL inspection (Zscaler, BlueCoat, etc.) inject enterprise CA certificates that Python doesn't recognize by default.
+
+**Quick Fix:**
+```bash
+# Option 1: Point to your corporate CA bundle (recommended)
+export ENYAL_SSL_CERT_FILE=/path/to/corporate-ca-bundle.crt
+enyal model download
+
+# Option 2: Pre-download model on unrestricted network, then use offline
+export ENYAL_OFFLINE_MODE=true
+```
+
+**For MCP configuration:**
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["enyal", "serve"],
+      "env": {
+        "ENYAL_SSL_CERT_FILE": "/path/to/corporate-ca-bundle.crt"
+      }
+    }
+  }
+}
+```
+
+**Check your SSL configuration:**
+```bash
+enyal model status
+```
+
+See [docs/SSL_TROUBLESHOOTING.md](docs/SSL_TROUBLESHOOTING.md) for detailed troubleshooting guide.
 
 ## Architecture
 

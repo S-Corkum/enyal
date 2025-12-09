@@ -383,6 +383,27 @@ def main() -> None:
         stream=sys.stderr,
     )
 
+    # Configure SSL settings BEFORE any model loading
+    # This is critical for corporate networks with SSL inspection
+    from enyal.core.ssl_config import (
+        configure_http_backend,
+        configure_ssl_environment,
+        get_ssl_config,
+    )
+
+    ssl_config = get_ssl_config()
+    configure_ssl_environment(ssl_config)
+    configure_http_backend(ssl_config)
+
+    if ssl_config.cert_file:
+        logger.info(f"SSL: Using CA bundle: {ssl_config.cert_file}")
+    if not ssl_config.verify:
+        logger.warning("SSL: Verification disabled (insecure)")
+    if ssl_config.offline_mode:
+        logger.info("SSL: Offline mode enabled")
+    if ssl_config.model_path:
+        logger.info(f"SSL: Using local model: {ssl_config.model_path}")
+
     # Optionally preload the embedding model
     if os.environ.get("ENYAL_PRELOAD_MODEL", "").lower() == "true":
         from enyal.embeddings.engine import EmbeddingEngine

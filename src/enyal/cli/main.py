@@ -156,6 +156,94 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_download(args: argparse.Namespace) -> int:
+    """Handle the model download command."""
+    from enyal.core.ssl_config import download_model
+
+    model_name = args.model or "all-MiniLM-L6-v2"
+
+    try:
+        print(f"Downloading model: {model_name}")
+        print("This may take a few minutes on first download...")
+
+        path = download_model(model_name, cache_dir=args.cache_dir)
+
+        if args.json:
+            print(json.dumps({"success": True, "model": model_name, "path": path}))
+        else:
+            print(f"\nModel downloaded successfully!")
+            print(f"Model: {model_name}")
+            print(f"Path: {path}")
+            print("\nThe model is now cached and available for offline use.")
+            print("Set ENYAL_OFFLINE_MODE=true to prevent future network calls.")
+
+        return 0
+
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"success": False, "error": str(e)}))
+        else:
+            print(f"\nError downloading model: {e}")
+            print("\nTroubleshooting:")
+            print("  - For corporate networks with SSL inspection:")
+            print("    export ENYAL_SSL_CERT_FILE=/path/to/corporate-ca-bundle.crt")
+            print("  - If you cannot obtain the CA bundle (last resort, insecure):")
+            print("    export ENYAL_SSL_VERIFY=false")
+        return 1
+
+
+def cmd_model_verify(args: argparse.Namespace) -> int:
+    """Handle the model verify command."""
+    from enyal.core.ssl_config import verify_model
+
+    model_path = args.model
+
+    print(f"Verifying model: {model_path or 'default (all-MiniLM-L6-v2)'}")
+
+    success = verify_model(model_path)
+
+    if args.json:
+        print(json.dumps({"success": success, "model": model_path or "all-MiniLM-L6-v2"}))
+    else:
+        if success:
+            print("\nModel verification successful!")
+            print("The model is ready for use.")
+        else:
+            print("\nModel verification failed!")
+            print("Check the error messages above for details.")
+
+    return 0 if success else 1
+
+
+def cmd_model_status(args: argparse.Namespace) -> int:
+    """Handle the model status command."""
+    from enyal.core.ssl_config import check_ssl_health
+
+    status = check_ssl_health()
+
+    if args.json:
+        print(json.dumps(status, indent=2, default=str))
+    else:
+        print("Enyal SSL/Network Configuration Status")
+        print("=" * 45)
+        print(f"SSL verification:     {'Enabled' if status['ssl_verify'] else 'DISABLED (insecure)'}")
+        print(f"CA certificate file:  {status['cert_file'] or 'Not set (using system default)'}")
+        if status['cert_file']:
+            print(f"  File exists:        {'Yes' if status['cert_file_exists'] else 'NO - FILE NOT FOUND'}")
+        print(f"System CA bundle:     {status['system_ca_bundle'] or 'Not found'}")
+        print(f"Local model path:     {status['model_path'] or 'Not set'}")
+        if status['model_path']:
+            print(f"  Path exists:        {'Yes' if status['model_path_exists'] else 'NO - PATH NOT FOUND'}")
+        print(f"Offline mode:         {'Enabled' if status['offline_mode'] else 'Disabled'}")
+        print(f"HF cache directory:   {status['hf_home'] or 'Default (~/.cache/huggingface)'}")
+        print()
+        print("Library versions:")
+        print(f"  huggingface_hub:    {status['huggingface_hub_version'] or 'Not installed'}")
+        print(f"  sentence_transformers: {status['sentence_transformers_version'] or 'Not installed'}")
+
+    return 0
+
+
 def cmd_get(args: argparse.Namespace) -> int:
     """Handle the get command."""
     store = get_store(args.db)
@@ -336,6 +424,48 @@ def main() -> int:
         help="Logging level",
     )
     serve_parser.set_defaults(func=cmd_serve)
+
+    # model command group
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Model management commands",
+    )
+    model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
+
+    # model download subcommand
+    model_download_parser = model_subparsers.add_parser(
+        "download",
+        help="Download embedding model for offline use",
+    )
+    model_download_parser.add_argument(
+        "--model",
+        "-m",
+        help="Model name (default: all-MiniLM-L6-v2)",
+    )
+    model_download_parser.add_argument(
+        "--cache-dir",
+        help="Custom cache directory",
+    )
+    model_download_parser.set_defaults(func=cmd_model_download)
+
+    # model verify subcommand
+    model_verify_parser = model_subparsers.add_parser(
+        "verify",
+        help="Verify model can be loaded",
+    )
+    model_verify_parser.add_argument(
+        "--model",
+        "-m",
+        help="Model path or name to verify",
+    )
+    model_verify_parser.set_defaults(func=cmd_model_verify)
+
+    # model status subcommand
+    model_status_parser = model_subparsers.add_parser(
+        "status",
+        help="Show SSL/network configuration status",
+    )
+    model_status_parser.set_defaults(func=cmd_model_status)
 
     args = parser.parse_args()
     result: int = args.func(args)

@@ -11,6 +11,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Flag to track if SSL has been configured
+_ssl_configured: bool = False
+
+
+def _ensure_ssl_configured() -> None:
+    """
+    Ensure SSL is configured before model download.
+
+    This must be called before importing sentence_transformers for the first time,
+    as the configuration affects how the library makes HTTP requests.
+    """
+    global _ssl_configured
+    if _ssl_configured:
+        return
+
+    from enyal.core.ssl_config import (
+        configure_http_backend,
+        configure_ssl_environment,
+        get_ssl_config,
+    )
+
+    config = get_ssl_config()
+    configure_ssl_environment(config)
+    configure_http_backend(config)
+    _ssl_configured = True
+    logger.debug("SSL configuration applied for embedding model download")
+
 
 class EmbeddingEngine:
     """
@@ -18,6 +45,16 @@ class EmbeddingEngine:
 
     The model is loaded only when first needed, reducing cold start time
     for operations that don't require embeddings.
+
+    SSL Configuration:
+        The engine automatically configures SSL settings from environment variables
+        before downloading the model. Set these environment variables for corporate
+        networks with SSL inspection:
+
+        - ENYAL_SSL_CERT_FILE: Path to corporate CA certificate bundle
+        - ENYAL_SSL_VERIFY: Set to "false" to disable verification (insecure)
+        - ENYAL_MODEL_PATH: Path to pre-downloaded model directory
+        - ENYAL_OFFLINE_MODE: Set to "true" to prevent network calls
     """
 
     _model: ClassVar["SentenceTransformer | None"] = None
@@ -29,14 +66,30 @@ class EmbeddingEngine:
         """
         Get the sentence transformer model, loading it if necessary.
 
+        The model will be downloaded from Hugging Face Hub on first use,
+        unless ENYAL_MODEL_PATH or ENYAL_OFFLINE_MODE is set.
+
         Returns:
             The loaded SentenceTransformer model.
+
+        Raises:
+            SSLError: If SSL verification fails in corporate environments.
+                Configure ENYAL_SSL_CERT_FILE with your CA bundle.
+            RuntimeError: If offline mode is enabled but model is not cached.
         """
         if cls._model is None:
-            logger.info(f"Loading embedding model: {cls._model_name}")
+            # Configure SSL before importing sentence_transformers
+            _ensure_ssl_configured()
+
+            from enyal.core.ssl_config import get_model_path
+
+            # Get model path (local or model name for download)
+            model_path = get_model_path(cls._model_name)
+
+            logger.info(f"Loading embedding model: {model_path}")
             from sentence_transformers import SentenceTransformer
 
-            cls._model = SentenceTransformer(cls._model_name)
+            cls._model = SentenceTransformer(model_path)
             logger.info("Embedding model loaded successfully")
         return cls._model
 
