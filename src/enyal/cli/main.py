@@ -226,20 +226,28 @@ def cmd_model_status(args: argparse.Namespace) -> int:
     else:
         print("Enyal SSL/Network Configuration Status")
         print("=" * 45)
-        print(f"SSL verification:     {'Enabled' if status['ssl_verify'] else 'DISABLED (insecure)'}")
+        print(
+            f"SSL verification:     {'Enabled' if status['ssl_verify'] else 'DISABLED (insecure)'}"
+        )
         print(f"CA certificate file:  {status['cert_file'] or 'Not set (using system default)'}")
-        if status['cert_file']:
-            print(f"  File exists:        {'Yes' if status['cert_file_exists'] else 'NO - FILE NOT FOUND'}")
+        if status["cert_file"]:
+            print(
+                f"  File exists:        {'Yes' if status['cert_file_exists'] else 'NO - FILE NOT FOUND'}"
+            )
         print(f"System CA bundle:     {status['system_ca_bundle'] or 'Not found'}")
         print(f"Local model path:     {status['model_path'] or 'Not set'}")
-        if status['model_path']:
-            print(f"  Path exists:        {'Yes' if status['model_path_exists'] else 'NO - PATH NOT FOUND'}")
+        if status["model_path"]:
+            print(
+                f"  Path exists:        {'Yes' if status['model_path_exists'] else 'NO - PATH NOT FOUND'}"
+            )
         print(f"Offline mode:         {'Enabled' if status['offline_mode'] else 'Disabled'}")
         print(f"HF cache directory:   {status['hf_home'] or 'Default (~/.cache/huggingface)'}")
         print()
         print("Library versions:")
         print(f"  huggingface_hub:    {status['huggingface_hub_version'] or 'Not installed'}")
-        print(f"  sentence_transformers: {status['sentence_transformers_version'] or 'Not installed'}")
+        print(
+            f"  sentence_transformers: {status['sentence_transformers_version'] or 'Not installed'}"
+        )
 
     return 0
 
