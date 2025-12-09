@@ -1,8 +1,8 @@
 """Tests for SSL configuration module."""
 
+import importlib
 import os
 import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,10 +94,12 @@ class TestGetSSLConfig:
 
     def test_cert_file_from_enyal_env(self) -> None:
         """Test cert_file from ENYAL_SSL_CERT_FILE."""
-        with tempfile.NamedTemporaryFile(suffix=".pem") as f:
-            with patch.dict(os.environ, {"ENYAL_SSL_CERT_FILE": f.name}, clear=False):
-                config = get_ssl_config()
-                assert config.cert_file == f.name
+        with (
+            tempfile.NamedTemporaryFile(suffix=".pem") as f,
+            patch.dict(os.environ, {"ENYAL_SSL_CERT_FILE": f.name}, clear=False),
+        ):
+            config = get_ssl_config()
+            assert config.cert_file == f.name
 
     def test_cert_file_priority(self) -> None:
         """Test ENYAL_SSL_CERT_FILE takes priority over others."""
@@ -135,10 +137,12 @@ class TestGetSSLConfig:
 
     def test_model_path_valid(self) -> None:
         """Test valid model path."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict(os.environ, {"ENYAL_MODEL_PATH": tmpdir}):
-                config = get_ssl_config()
-                assert config.model_path == tmpdir
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"ENYAL_MODEL_PATH": tmpdir}),
+        ):
+            config = get_ssl_config()
+            assert config.model_path == tmpdir
 
     def test_model_path_invalid_logs_warning(self) -> None:
         """Test invalid model path logs warning."""
@@ -206,10 +210,12 @@ class TestConfigureHTTPBackend:
     def test_configures_huggingface_hub(self) -> None:
         """Test configures huggingface_hub HTTP backend."""
         mock_configure = MagicMock()
-        with patch.dict("sys.modules", {"huggingface_hub": MagicMock(configure_http_backend=mock_configure)}):
+        with patch.dict(
+            "sys.modules",
+            {"huggingface_hub": MagicMock(configure_http_backend=mock_configure)},
+        ):
             from enyal.core import ssl_config
-            # Force re-import to get patched module
-            import importlib
+
             importlib.reload(ssl_config)
 
             config = SSLConfig()
@@ -245,17 +251,21 @@ class TestGetModelPath:
 
     def test_returns_local_path_when_set(self) -> None:
         """Test returns local model path when ENYAL_MODEL_PATH is set."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict(os.environ, {"ENYAL_MODEL_PATH": tmpdir}):
-                path = get_model_path()
-                assert path == tmpdir
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"ENYAL_MODEL_PATH": tmpdir}),
+        ):
+            path = get_model_path()
+            assert path == tmpdir
 
     def test_offline_mode_raises_without_cache(self) -> None:
         """Test offline mode raises error when model not cached."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict(os.environ, {"ENYAL_OFFLINE_MODE": "true", "HF_HOME": tmpdir}):
-                with pytest.raises(RuntimeError, match="Offline mode is enabled"):
-                    get_model_path()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"ENYAL_OFFLINE_MODE": "true", "HF_HOME": tmpdir}),
+            pytest.raises(RuntimeError, match="Offline mode is enabled"),
+        ):
+            get_model_path()
 
 
 class TestCheckSSLHealth:
@@ -288,11 +298,13 @@ class TestCheckSSLHealth:
 
     def test_cert_file_exists_accurate(self) -> None:
         """Test cert_file_exists is accurate."""
-        with tempfile.NamedTemporaryFile(suffix=".pem") as f:
-            with patch.dict(os.environ, {"ENYAL_SSL_CERT_FILE": f.name}):
-                status = check_ssl_health()
-                assert status["cert_file"] == f.name
-                assert status["cert_file_exists"] is True
+        with (
+            tempfile.NamedTemporaryFile(suffix=".pem") as f,
+            patch.dict(os.environ, {"ENYAL_SSL_CERT_FILE": f.name}),
+        ):
+            status = check_ssl_health()
+            assert status["cert_file"] == f.name
+            assert status["cert_file_exists"] is True
 
         with patch.dict(os.environ, {"ENYAL_SSL_CERT_FILE": "/nonexistent.pem"}):
             status = check_ssl_health()
@@ -311,6 +323,9 @@ class TestFindSystemCABundle:
 
     def test_returns_none_when_not_found(self) -> None:
         """Test returns None when no bundle found."""
-        with patch("enyal.core.ssl_config.PLATFORM_CA_BUNDLES", {"Darwin": [], "Linux": [], "Windows": []}):
+        with patch(
+            "enyal.core.ssl_config.PLATFORM_CA_BUNDLES",
+            {"Darwin": [], "Linux": [], "Windows": []},
+        ):
             bundle = _find_system_ca_bundle()
             assert bundle is None
