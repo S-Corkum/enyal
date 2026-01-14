@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from enyal.core.retrieval import RetrievalEngine
 from enyal.core.store import ContextStore
-from enyal.models.context import ContextType, ScopeLevel
+from enyal.models.context import ContextType, EdgeType, ScopeLevel
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,42 @@ class RememberInput(BaseModel):
         default="reject",
         description="Action when duplicate found: reject (return existing), merge, store",
     )
+    # Graph relationship parameters
+    auto_link: bool = Field(
+        default=False,
+        description="Automatically create RELATES_TO edges for similar entries",
+    )
+    auto_link_threshold: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Similarity threshold for auto-linking",
+    )
+    relates_to: list[str] | None = Field(
+        default=None,
+        description="Entry IDs to create RELATES_TO edges with",
+    )
+    supersedes: str | None = Field(
+        default=None,
+        description="Entry ID that this entry supersedes",
+    )
+    depends_on: list[str] | None = Field(
+        default=None,
+        description="Entry IDs that this entry depends on",
+    )
+    # Conflict and supersedes detection
+    detect_conflicts: bool = Field(
+        default=False,
+        description="Detect and flag potential contradictions with existing entries",
+    )
+    suggest_supersedes: bool = Field(
+        default=False,
+        description="Suggest entries that this new entry might supersede",
+    )
+    auto_supersede: bool = Field(
+        default=False,
+        description="Automatically create SUPERSEDES edges for very similar entries",
+    )
 
 
 class RecallInput(BaseModel):
@@ -110,6 +146,21 @@ class RecallInput(BaseModel):
         le=1.0,
         description="Minimum confidence threshold",
     )
+    # Validity parameters
+    exclude_superseded: bool = Field(
+        default=True,
+        description="Exclude entries that have been superseded by newer entries",
+    )
+    flag_conflicts: bool = Field(
+        default=True,
+        description="Mark entries that have unresolved conflicts",
+    )
+    freshness_boost: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="How much to boost recent entries (0=ignore time, 1=heavy time weight)",
+    )
 
 
 class RecallByScopeInput(BaseModel):
@@ -129,6 +180,10 @@ class RecallByScopeInput(BaseModel):
         le=1.0,
         description="Minimum confidence threshold",
     )
+    # Validity parameters
+    exclude_superseded: bool = Field(default=True, description="Exclude superseded entries")
+    flag_conflicts: bool = Field(default=True, description="Flag conflicted entries")
+    freshness_boost: float = Field(default=0.1, ge=0.0, le=1.0, description="Freshness weight")
 
 
 class ForgetInput(BaseModel):
@@ -158,6 +213,79 @@ class UpdateInput(BaseModel):
     tags: list[str] | None = Field(
         default=None,
         description="New tags (replaces existing)",
+    )
+
+
+class LinkInput(BaseModel):
+    """Input for the link tool."""
+
+    source_id: str = Field(description="ID of the source entry")
+    target_id: str = Field(description="ID of the target entry")
+    relation: str = Field(
+        description="Relationship type: relates_to, supersedes, depends_on, conflicts_with"
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score for this relationship",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Optional reason for this relationship",
+    )
+
+
+class EdgesInput(BaseModel):
+    """Input for the edges tool."""
+
+    entry_id: str = Field(description="ID of the entry to get edges for")
+    direction: str = Field(
+        default="both",
+        description="Direction: outgoing, incoming, or both",
+    )
+    relation_type: str | None = Field(
+        default=None,
+        description="Filter by relationship type",
+    )
+
+
+class TraverseInput(BaseModel):
+    """Input for the traverse tool."""
+
+    start_query: str = Field(description="Query to find starting node(s)")
+    relation_types: list[str] | None = Field(
+        default=None,
+        description="Filter by relationship types",
+    )
+    direction: str = Field(
+        default="outgoing",
+        description="Direction: outgoing or incoming",
+    )
+    max_depth: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description="Maximum traversal depth",
+    )
+
+
+class ImpactInput(BaseModel):
+    """Input for the impact tool."""
+
+    entry_id: str | None = Field(
+        default=None,
+        description="Entry ID to analyze impact for",
+    )
+    query: str | None = Field(
+        default=None,
+        description="Or query to find the entry",
+    )
+    max_depth: int = Field(
+        default=3,
+        ge=1,
+        le=4,
+        description="Maximum depth for impact analysis",
     )
 
 
@@ -196,6 +324,16 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
             check_duplicate=input.check_duplicate,
             duplicate_threshold=input.duplicate_threshold,
             on_duplicate=input.on_duplicate,
+            # Graph parameters
+            auto_link=input.auto_link,
+            auto_link_threshold=input.auto_link_threshold,
+            relates_to=input.relates_to,
+            supersedes=input.supersedes,
+            depends_on=input.depends_on,
+            # Conflict/supersedes detection
+            detect_conflicts=input.detect_conflicts,
+            suggest_supersedes=input.suggest_supersedes,
+            auto_supersede=input.auto_supersede,
         )
 
         # Handle both return types (str or dict)
@@ -210,7 +348,7 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
             else:
                 message = f"Stored context: {input.content[:50]}..."
 
-            return {
+            response = {
                 "success": True,
                 "entry_id": entry_id,
                 "action": action,
@@ -218,6 +356,14 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
                 "similarity": result.get("similarity"),
                 "message": message,
             }
+
+            # Include conflict/supersedes info if detection was enabled
+            if input.detect_conflicts:
+                response["potential_conflicts"] = result.get("potential_conflicts", [])
+            if input.suggest_supersedes:
+                response["supersedes_candidates"] = result.get("supersedes_candidates", [])
+
+            return response
         else:
             # Legacy string return (check_duplicate=False)
             return {
@@ -254,6 +400,10 @@ def enyal_recall(input: RecallInput) -> dict[str, Any]:
             scope_path=input.scope_path,
             content_type=ContextType(input.content_type) if input.content_type else None,
             min_confidence=input.min_confidence,
+            # Validity parameters
+            exclude_superseded=input.exclude_superseded,
+            flag_conflicts=input.flag_conflicts,
+            freshness_boost=input.freshness_boost,
         )
 
         return {
@@ -271,6 +421,12 @@ def enyal_recall(input: RecallInput) -> dict[str, Any]:
                     "tags": r.entry.tags,
                     "created_at": r.entry.created_at.isoformat(),
                     "updated_at": r.entry.updated_at.isoformat(),
+                    # Validity metadata
+                    "is_superseded": r.is_superseded,
+                    "superseded_by": r.superseded_by,
+                    "has_conflicts": r.has_conflicts,
+                    "freshness_score": round(r.freshness_score, 4),
+                    "adjusted_score": round(r.adjusted_score, 4) if r.adjusted_score else None,
                 }
                 for r in results
             ],
@@ -309,6 +465,9 @@ def enyal_recall_by_scope(input: RecallByScopeInput) -> dict[str, Any]:
             file_path=input.file_path,
             limit=input.limit,
             min_confidence=input.min_confidence,
+            exclude_superseded=input.exclude_superseded,
+            flag_conflicts=input.flag_conflicts,
+            freshness_boost=input.freshness_boost,
         )
 
         return {
@@ -326,6 +485,12 @@ def enyal_recall_by_scope(input: RecallByScopeInput) -> dict[str, Any]:
                     "tags": r.entry.tags,
                     "created_at": r.entry.created_at.isoformat(),
                     "updated_at": r.entry.updated_at.isoformat(),
+                    # Validity metadata
+                    "is_superseded": r.is_superseded,
+                    "superseded_by": r.superseded_by,
+                    "has_conflicts": r.has_conflicts,
+                    "freshness_score": round(r.freshness_score, 4),
+                    "adjusted_score": round(r.adjusted_score, 4) if r.adjusted_score else None,
                 }
                 for r in results
             ],
@@ -436,6 +601,10 @@ def enyal_stats() -> dict[str, Any]:
                 "storage_size_mb": round(stats.storage_size_bytes / (1024 * 1024), 2),
                 "oldest_entry": stats.oldest_entry.isoformat() if stats.oldest_entry else None,
                 "newest_entry": stats.newest_entry.isoformat() if stats.newest_entry else None,
+                # Graph statistics
+                "total_edges": stats.total_edges,
+                "edges_by_type": stats.edges_by_type,
+                "connected_entries": stats.connected_entries,
             },
         }
     except Exception as e:
@@ -451,13 +620,18 @@ def enyal_get(entry_id: str) -> dict[str, Any]:
     """
     Get a specific context entry by ID.
 
-    Returns full details of the entry including all metadata.
+    Returns full details of the entry including all metadata and relationships.
     """
     store = get_store()
 
     try:
         entry = store.get(entry_id)
         if entry:
+            # Get edges for this entry
+            edges = store.get_edges(entry_id, direction="both")
+            outgoing_edges = [e for e in edges if e.source_id == entry_id]
+            incoming_edges = [e for e in edges if e.target_id == entry_id]
+
             return {
                 "success": True,
                 "entry": {
@@ -477,6 +651,26 @@ def enyal_get(entry_id: str) -> dict[str, Any]:
                     "access_count": entry.access_count,
                     "is_deprecated": entry.is_deprecated,
                 },
+                "edges": {
+                    "outgoing": [
+                        {
+                            "id": e.id,
+                            "target_id": e.target_id,
+                            "relation": e.edge_type.value,
+                            "confidence": e.confidence,
+                        }
+                        for e in outgoing_edges
+                    ],
+                    "incoming": [
+                        {
+                            "id": e.id,
+                            "source_id": e.source_id,
+                            "relation": e.edge_type.value,
+                            "confidence": e.confidence,
+                        }
+                        for e in incoming_edges
+                    ],
+                },
             }
         else:
             return {
@@ -489,6 +683,455 @@ def enyal_get(entry_id: str) -> dict[str, Any]:
             "success": False,
             "error": str(e),
         }
+
+
+@mcp.tool()
+def enyal_link(input: LinkInput) -> dict[str, Any]:
+    """
+    Create a relationship between two context entries.
+
+    Use this to explicitly connect related entries. Relationship types:
+    - relates_to: General semantic relationship
+    - supersedes: This entry replaces an older one
+    - depends_on: This entry requires another
+    - conflicts_with: These entries contradict each other
+    """
+    store = get_store()
+
+    try:
+        edge_id = store.link(
+            source_id=input.source_id,
+            target_id=input.target_id,
+            edge_type=EdgeType(input.relation),
+            confidence=input.confidence,
+            metadata={"reason": input.reason} if input.reason else {},
+        )
+
+        if edge_id:
+            return {
+                "success": True,
+                "edge_id": edge_id,
+                "message": f"Created {input.relation} relationship",
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Could not create edge (entries may not exist or edge already exists)",
+            }
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid relation type: {e}"}
+    except Exception as e:
+        logger.exception("Error creating edge")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def enyal_unlink(edge_id: str) -> dict[str, Any]:
+    """
+    Remove a relationship between entries.
+
+    Use this to delete an edge that was created with enyal_link.
+    """
+    store = get_store()
+
+    try:
+        success = store.unlink(edge_id)
+        if success:
+            return {"success": True, "message": f"Removed edge {edge_id}"}
+        else:
+            return {"success": False, "error": f"Edge {edge_id} not found"}
+    except Exception as e:
+        logger.exception("Error removing edge")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def enyal_edges(input: EdgesInput) -> dict[str, Any]:
+    """
+    Get relationships for a context entry.
+
+    Returns all edges connected to the specified entry, optionally
+    filtered by direction and relationship type.
+    """
+    store = get_store()
+
+    try:
+        edges = store.get_edges(
+            entry_id=input.entry_id,
+            direction=input.direction,
+            edge_type=EdgeType(input.relation_type) if input.relation_type else None,
+        )
+
+        return {
+            "success": True,
+            "count": len(edges),
+            "edges": [
+                {
+                    "id": e.id,
+                    "source_id": e.source_id,
+                    "target_id": e.target_id,
+                    "relation": e.edge_type.value,
+                    "confidence": e.confidence,
+                    "created_at": e.created_at.isoformat(),
+                    "metadata": e.metadata,
+                }
+                for e in edges
+            ],
+        }
+    except ValueError as e:
+        return {"success": False, "error": str(e), "edges": []}
+    except Exception as e:
+        logger.exception("Error getting edges")
+        return {"success": False, "error": str(e), "edges": []}
+
+
+@mcp.tool()
+def enyal_traverse(input: TraverseInput) -> dict[str, Any]:
+    """
+    Traverse the knowledge graph from a starting point.
+
+    Finds the starting entry via semantic search, then walks the graph
+    following the specified relationship types up to max_depth levels.
+    """
+    store = get_store()
+    retrieval = get_retrieval()
+
+    try:
+        # Find starting node via search
+        search_results = retrieval.search(query=input.start_query, limit=1)
+        if not search_results:
+            return {
+                "success": False,
+                "error": f"No entry found matching: {input.start_query}",
+            }
+
+        start_entry = search_results[0].entry
+        edge_types: list[EdgeType | str] | None = (
+            [EdgeType(et) for et in input.relation_types] if input.relation_types else None
+        )
+
+        results = store.traverse(
+            start_id=start_entry.id,
+            edge_types=edge_types,
+            direction=input.direction,
+            max_depth=input.max_depth,
+        )
+
+        return {
+            "success": True,
+            "start_entry": {
+                "id": start_entry.id,
+                "content": start_entry.content,
+            },
+            "count": len(results),
+            "results": [
+                {
+                    "id": r["entry"].id,
+                    "content": r["entry"].content,
+                    "depth": r["depth"],
+                    "relation": r["edge_type"],
+                    "confidence": r["confidence"],
+                }
+                for r in results
+            ],
+        }
+    except ValueError as e:
+        return {"success": False, "error": str(e), "results": []}
+    except Exception as e:
+        logger.exception("Error traversing graph")
+        return {"success": False, "error": str(e), "results": []}
+
+
+@mcp.tool()
+def enyal_impact(input: ImpactInput) -> dict[str, Any]:
+    """
+    Analyze what would be affected if an entry changes.
+
+    Finds all entries that depend on the specified entry (directly or
+    transitively), helping you understand the impact of potential changes.
+    """
+    store = get_store()
+    retrieval = get_retrieval()
+
+    try:
+        # Find target entry
+        if input.entry_id:
+            target = store.get(input.entry_id)
+            if not target:
+                return {"success": False, "error": f"Entry {input.entry_id} not found"}
+        elif input.query:
+            search_results = retrieval.search(query=input.query, limit=1)
+            if not search_results:
+                return {"success": False, "error": f"No entry found matching: {input.query}"}
+            target = search_results[0].entry
+        else:
+            return {"success": False, "error": "Provide either entry_id or query"}
+
+        # Traverse INCOMING depends_on and relates_to edges
+        depends_on_results = store.traverse(
+            start_id=target.id,
+            edge_types=[EdgeType.DEPENDS_ON],
+            direction="incoming",
+            max_depth=input.max_depth,
+        )
+
+        relates_to_results = store.traverse(
+            start_id=target.id,
+            edge_types=[EdgeType.RELATES_TO],
+            direction="incoming",
+            max_depth=input.max_depth,
+        )
+
+        # Group by depth
+        direct_deps = [r for r in depends_on_results if r["depth"] == 1]
+        transitive_deps = [r for r in depends_on_results if r["depth"] > 1]
+        related = [r for r in relates_to_results if r["confidence"] >= 0.8]
+
+        return {
+            "success": True,
+            "target": {
+                "id": target.id,
+                "content": target.content,
+            },
+            "impact": {
+                "direct_dependencies": len(direct_deps),
+                "transitive_dependencies": len(transitive_deps),
+                "related_entries": len(related),
+            },
+            "direct_dependencies": [
+                {"id": r["entry"].id, "content": r["entry"].content} for r in direct_deps
+            ],
+            "transitive_dependencies": [
+                {"id": r["entry"].id, "content": r["entry"].content, "depth": r["depth"]}
+                for r in transitive_deps
+            ],
+            "related": [
+                {
+                    "id": r["entry"].id,
+                    "content": r["entry"].content,
+                    "confidence": r["confidence"],
+                }
+                for r in related
+            ],
+        }
+    except Exception as e:
+        logger.exception("Error analyzing impact")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def enyal_health() -> dict[str, Any]:
+    """
+    Get comprehensive health metrics for the knowledge graph.
+
+    Returns statistics about:
+    - Superseded entries that should be cleaned up
+    - Unresolved conflicts needing attention
+    - Stale entries not updated recently
+    - Orphan entries with no connections
+    - Low confidence entries
+    - Never accessed entries
+    - Overall health score (0-1)
+    """
+    store = get_store()
+
+    try:
+        health = store.health_check()
+        return {
+            "success": True,
+            "health": health,
+            "recommendations": _get_health_recommendations(health),
+        }
+    except Exception as e:
+        logger.exception("Error checking health")
+        return {"success": False, "error": str(e)}
+
+
+def _get_health_recommendations(health: dict[str, Any]) -> list[str]:
+    """Generate recommendations based on health metrics."""
+    recommendations = []
+
+    if health["superseded_entries"] > 10:
+        recommendations.append(
+            f"Consider cleaning up {health['superseded_entries']} superseded entries"
+        )
+    if health["unresolved_conflicts"] > 0:
+        recommendations.append(
+            f"Resolve {health['unresolved_conflicts']} conflicting entries"
+        )
+    if health["stale_entries"] > 20:
+        recommendations.append(
+            f"Review {health['stale_entries']} stale entries (>6 months old)"
+        )
+    if health["orphan_entries"] > health["total_entries"] * 0.3:
+        recommendations.append(
+            "Many entries have no connections - consider linking related entries"
+        )
+    if health["health_score"] < 0.7:
+        recommendations.append("Overall health is low - maintenance recommended")
+
+    return recommendations or ["Graph health is good!"]
+
+
+class ReviewInput(BaseModel):
+    """Input for the review tool."""
+
+    category: str = Field(
+        default="all",
+        description="Category to review: all, stale, orphan, conflicts",
+    )
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum entries to return",
+    )
+
+
+class HistoryInput(BaseModel):
+    """Input for the history tool."""
+
+    entry_id: str = Field(description="Entry ID to get history for")
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum versions to return",
+    )
+
+
+class AnalyticsInput(BaseModel):
+    """Input for the analytics tool."""
+
+    entry_id: str | None = Field(
+        default=None,
+        description="Filter by specific entry (optional)",
+    )
+    event_type: str | None = Field(
+        default=None,
+        description="Filter by event type: recall, update, link, impact",
+    )
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Days of history to include",
+    )
+
+
+@mcp.tool()
+def enyal_review(input: ReviewInput) -> dict[str, Any]:
+    """
+    Review entries that need attention.
+
+    Categories:
+    - all: Summary of all categories
+    - stale: Entries not updated in 6+ months
+    - orphan: Entries with no graph connections
+    - conflicts: Entries with unresolved conflicts
+    """
+    store = get_store()
+
+    try:
+        result: dict[str, Any] = {"success": True}
+
+        if input.category in ("all", "stale"):
+            stale = store.get_stale_entries(limit=input.limit)
+            result["stale_entries"] = [
+                {
+                    "id": e.id,
+                    "content": e.content[:100],
+                    "updated_at": e.updated_at.isoformat(),
+                    "confidence": e.confidence,
+                }
+                for e in stale
+            ]
+
+        if input.category in ("all", "orphan"):
+            orphans = store.get_orphan_entries(limit=input.limit)
+            result["orphan_entries"] = [
+                {
+                    "id": e.id,
+                    "content": e.content[:100],
+                    "created_at": e.created_at.isoformat(),
+                }
+                for e in orphans
+            ]
+
+        if input.category in ("all", "conflicts"):
+            conflicts = store.get_conflicted_entries(limit=input.limit)
+            result["conflicted_entries"] = [
+                {
+                    "entry1_id": c["entry1"].id,
+                    "entry1_content": c["entry1"].content[:100],
+                    "entry2_id": c["entry2"].id,
+                    "entry2_content": c["entry2"].content[:100],
+                }
+                for c in conflicts
+            ]
+
+        return result
+    except Exception as e:
+        logger.exception("Error reviewing entries")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def enyal_history(input: HistoryInput) -> dict[str, Any]:
+    """
+    Get version history for an entry.
+
+    Shows how an entry has changed over time, including content changes,
+    confidence updates, and tag modifications.
+    """
+    store = get_store()
+
+    try:
+        history = store.get_history(input.entry_id, limit=input.limit)
+        entry = store.get(input.entry_id)
+
+        if not entry:
+            return {
+                "success": False,
+                "error": f"Entry {input.entry_id} not found",
+            }
+
+        return {
+            "success": True,
+            "entry_id": input.entry_id,
+            "current_content": entry.content[:100],
+            "version_count": len(history),
+            "history": history,
+        }
+    except Exception as e:
+        logger.exception("Error getting history")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def enyal_analytics(input: AnalyticsInput) -> dict[str, Any]:
+    """
+    Get usage analytics for the knowledge graph.
+
+    Shows which entries are most frequently recalled, how often
+    entries are updated, and usage patterns over time.
+    """
+    store = get_store()
+
+    try:
+        analytics = store.get_analytics(
+            entry_id=input.entry_id,
+            event_type=input.event_type,
+            days=input.days,
+        )
+
+        return {
+            "success": True,
+            "analytics": analytics,
+        }
+    except Exception as e:
+        logger.exception("Error getting analytics")
+        return {"success": False, "error": str(e)}
 
 
 # Entry point for running the server

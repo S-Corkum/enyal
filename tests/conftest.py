@@ -12,10 +12,12 @@ import pytest
 from numpy.typing import NDArray
 
 from enyal.models.context import (
+    ContextEdge,
     ContextEntry,
     ContextSearchResult,
     ContextStats,
     ContextType,
+    EdgeType,
     ScopeLevel,
     SourceType,
 )
@@ -211,3 +213,37 @@ def mock_fts_results() -> list[dict[str, Any]]:
         {"entry_id": "fts-match-1", "bm25_score": -5.5},
         {"entry_id": "fts-match-2", "bm25_score": -3.2},
     ]
+
+
+@pytest.fixture
+def sample_edge() -> ContextEdge:
+    """Create a sample ContextEdge for tests."""
+    return ContextEdge(
+        source_id="source-entry-id",
+        target_id="target-entry-id",
+        edge_type=EdgeType.RELATES_TO,
+        confidence=0.9,
+        metadata={"test": True},
+    )
+
+
+@pytest.fixture
+def sample_edge_supersedes() -> ContextEdge:
+    """Create a supersedes edge for tests."""
+    return ContextEdge(
+        source_id="new-entry-id",
+        target_id="old-entry-id",
+        edge_type=EdgeType.SUPERSEDES,
+        confidence=1.0,
+    )
+
+
+@pytest.fixture
+def sample_edge_depends_on() -> ContextEdge:
+    """Create a depends_on edge for tests."""
+    return ContextEdge(
+        source_id="dependent-entry-id",
+        target_id="dependency-entry-id",
+        edge_type=EdgeType.DEPENDS_ON,
+        confidence=1.0,
+    )

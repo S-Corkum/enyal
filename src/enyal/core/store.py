@@ -6,9 +6,10 @@ import os
 import sqlite3
 import struct
 import threading
+import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,11 @@ from numpy.typing import NDArray
 
 from enyal.embeddings.engine import EmbeddingEngine
 from enyal.models.context import (
+    ContextEdge,
     ContextEntry,
     ContextStats,
     ContextType,
+    EdgeType,
     ScopeLevel,
     SourceType,
 )
@@ -77,12 +80,67 @@ CREATE TRIGGER IF NOT EXISTS context_fts_update AFTER UPDATE ON context_entries 
     INSERT INTO context_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
+-- Knowledge graph edges
+CREATE TABLE IF NOT EXISTS context_edges (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    edge_type TEXT NOT NULL CHECK (edge_type IN (
+        'relates_to', 'supersedes', 'depends_on', 'conflicts_with'
+    )),
+    confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0 AND confidence <= 1),
+    created_at TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}',
+    UNIQUE(source_id, target_id, edge_type),
+    FOREIGN KEY (source_id) REFERENCES context_entries(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_id) REFERENCES context_entries(id) ON DELETE CASCADE
+);
+
+-- Edge indexes
+CREATE INDEX IF NOT EXISTS idx_edges_source ON context_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON context_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_type ON context_edges(edge_type);
+
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_context_scope ON context_entries(scope_level, scope_path);
 CREATE INDEX IF NOT EXISTS idx_context_type ON context_entries(content_type);
 CREATE INDEX IF NOT EXISTS idx_context_updated ON context_entries(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_context_confidence ON context_entries(confidence DESC);
 CREATE INDEX IF NOT EXISTS idx_context_active ON context_entries(is_deprecated) WHERE is_deprecated = 0;
+
+-- Entry version history
+CREATE TABLE IF NOT EXISTS context_versions (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    changed_at TEXT NOT NULL,
+    change_type TEXT NOT NULL CHECK (change_type IN ('created', 'updated', 'restored')),
+    metadata TEXT DEFAULT '{}',
+    FOREIGN KEY (entry_id) REFERENCES context_entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_versions_entry ON context_versions(entry_id);
+CREATE INDEX IF NOT EXISTS idx_versions_changed ON context_versions(changed_at DESC);
+
+-- Usage analytics
+CREATE TABLE IF NOT EXISTS context_analytics (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('recall', 'update', 'link', 'impact')),
+    event_at TEXT NOT NULL,
+    query TEXT,
+    result_rank INTEGER,
+    metadata TEXT DEFAULT '{}',
+    FOREIGN KEY (entry_id) REFERENCES context_entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_entry ON context_analytics(entry_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_event ON context_analytics(event_type);
+CREATE INDEX IF NOT EXISTS idx_analytics_time ON context_analytics(event_at DESC);
 """
 
 
@@ -125,7 +183,7 @@ class ContextStore:
             db_path: Path to the SQLite database file.
         """
         self.db_path = Path(db_path).expanduser()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()  # Reentrant lock for nested transactions
         self._local = threading.local()
         self._init_db()
 
@@ -202,6 +260,19 @@ class ContextStore:
         check_duplicate: bool = False,
         duplicate_threshold: float = 0.85,
         on_duplicate: str = "reject",
+        # Graph relationship parameters
+        auto_link: bool = False,
+        auto_link_threshold: float = 0.85,
+        relates_to: list[str] | None = None,
+        supersedes: str | None = None,
+        depends_on: list[str] | None = None,
+        # Conflict detection
+        detect_conflicts: bool = False,
+        conflict_threshold: float = 0.9,
+        # Supersedes suggestion
+        suggest_supersedes: bool = False,
+        supersedes_threshold: float = 0.95,
+        auto_supersede: bool = False,
     ) -> str | dict[str, Any]:
         """
         Store new context in memory.
@@ -222,10 +293,21 @@ class ContextStore:
                 - "reject": Return existing entry ID without storing
                 - "merge": Merge into existing entry (combine tags, update confidence)
                 - "store": Store anyway as new entry
+            auto_link: Automatically create RELATES_TO edges for similar entries.
+            auto_link_threshold: Similarity threshold for auto-linking (0-1).
+            relates_to: Entry IDs to create RELATES_TO edges with.
+            supersedes: Entry ID that this entry supersedes.
+            depends_on: Entry IDs that this entry depends on.
+            detect_conflicts: Detect and flag potential contradictions with existing entries.
+            conflict_threshold: Similarity threshold for conflict detection (0-1).
+            suggest_supersedes: Suggest entries that this new entry might supersede.
+            supersedes_threshold: Similarity threshold for supersedes suggestion (0-1).
+            auto_supersede: Automatically create SUPERSEDES edges for very similar entries.
 
         Returns:
-            Entry ID (str) if check_duplicate=False.
-            Dict with entry_id, action, duplicate_of, similarity if check_duplicate=True.
+            Entry ID (str) if no detection features enabled.
+            Dict with entry_id, action, and detection info if check_duplicate, detect_conflicts,
+            or suggest_supersedes is True.
         """
         entry = ContextEntry(
             content=content,
@@ -321,14 +403,99 @@ class ContextStore:
                 (entry.id, serialize_embedding(embedding)),
             )
 
+            # Create explicit edges if provided (INSIDE transaction)
+            if supersedes:
+                self.link(entry.id, supersedes, EdgeType.SUPERSEDES)
+            if depends_on:
+                for dep_id in depends_on:
+                    self.link(entry.id, dep_id, EdgeType.DEPENDS_ON)
+            if relates_to:
+                for rel_id in relates_to:
+                    self.link(entry.id, rel_id, EdgeType.RELATES_TO)
+
+        # Auto-generate RELATES_TO edges based on similarity (OUTSIDE write transaction)
+        if auto_link:
+            similar = self.find_similar(
+                content=content,
+                threshold=auto_link_threshold,
+                limit=5,
+                exclude_deprecated=True,
+            )
+            for match in similar:
+                if match["entry_id"] != entry.id:
+                    self.link(
+                        entry.id,
+                        match["entry_id"],
+                        EdgeType.RELATES_TO,
+                        confidence=match["similarity"],
+                        metadata={"auto_generated": True},
+                    )
+
+        # Detect potential conflicts if requested
+        potential_conflicts: list[dict[str, Any]] = []
+        if detect_conflicts:
+            similar = self.find_similar(
+                content=content,
+                threshold=conflict_threshold,
+                limit=5,
+                exclude_deprecated=True,
+            )
+            for match in similar:
+                existing = match["entry"]
+                # Heuristic: Same scope + type + high similarity + contradiction = conflict
+                if (existing.scope_level == entry.scope_level and
+                    existing.content_type == entry.content_type and
+                    existing.id != entry.id and
+                    self._appears_contradictory(content, existing.content)):
+                    self.link(
+                        entry.id, existing.id, EdgeType.CONFLICTS_WITH,
+                        metadata={"detected_at": "store", "similarity": match["similarity"]}
+                    )
+                    potential_conflicts.append({
+                        "entry_id": existing.id,
+                        "content": existing.content[:100],
+                        "similarity": match["similarity"],
+                    })
+
+        # Suggest or auto-create supersedes relationships
+        supersedes_candidates: list[dict[str, Any]] = []
+        if suggest_supersedes or auto_supersede:
+            similar = self.find_similar(
+                content=content,
+                threshold=supersedes_threshold,
+                limit=3,
+                exclude_deprecated=True,
+            )
+            for match in similar:
+                existing = match["entry"]
+                if (existing.id != entry.id and
+                    existing.scope_level == entry.scope_level and
+                    existing.content_type == entry.content_type):
+                    if auto_supersede:
+                        self.link(entry.id, existing.id, EdgeType.SUPERSEDES,
+                                 metadata={"auto_detected": True, "similarity": match["similarity"]})
+                    supersedes_candidates.append({
+                        "entry_id": existing.id,
+                        "content": existing.content[:100],
+                        "similarity": match["similarity"],
+                        "auto_superseded": auto_supersede,
+                    })
+
         logger.info(f"Stored context entry: {entry.id}")
-        if check_duplicate:
+
+        # Build return value based on what was requested
+        # Maintain backward compatibility: only return dict if explicitly requested
+        if check_duplicate or detect_conflicts or suggest_supersedes:
             return {
                 "entry_id": entry.id,
                 "action": "created",
                 "duplicate_of": None,
                 "similarity": None,
+                "potential_conflicts": potential_conflicts if detect_conflicts else [],
+                "supersedes_candidates": supersedes_candidates if suggest_supersedes else [],
             }
+
+        # Default: return just the entry ID (backward compatible)
         return entry.id
 
     def recall(
@@ -681,6 +848,26 @@ class ContextStore:
             # Storage size
             storage_size = os.path.getsize(self.db_path) if self.db_path.exists() else 0
 
+            # Edge statistics
+            total_edges = conn.execute("SELECT COUNT(*) FROM context_edges").fetchone()[0]
+
+            edges_by_type: dict[str, int] = {}
+            for row in conn.execute(
+                "SELECT edge_type, COUNT(*) as cnt FROM context_edges GROUP BY edge_type"
+            ):
+                edges_by_type[row["edge_type"]] = row["cnt"]
+
+            connected_entries = conn.execute(
+                """
+                SELECT COUNT(DISTINCT id) FROM context_entries
+                WHERE id IN (
+                    SELECT source_id FROM context_edges
+                    UNION
+                    SELECT target_id FROM context_edges
+                )
+                """
+            ).fetchone()[0]
+
             return ContextStats(
                 total_entries=total,
                 active_entries=active,
@@ -691,6 +878,10 @@ class ContextStore:
                 storage_size_bytes=storage_size,
                 oldest_entry=datetime.fromisoformat(oldest) if oldest else None,
                 newest_entry=datetime.fromisoformat(newest) if newest else None,
+                # Graph statistics
+                total_edges=total_edges,
+                edges_by_type=edges_by_type,
+                connected_entries=connected_entries,
             )
 
     def _row_to_entry(self, row: dict[str, Any]) -> ContextEntry:
@@ -712,6 +903,735 @@ class ContextStore:
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
             is_deprecated=bool(row["is_deprecated"]),
         )
+
+    def _row_to_edge(self, row: dict[str, Any]) -> ContextEdge:
+        """Convert a database row to a ContextEdge."""
+        return ContextEdge(
+            id=row["id"],
+            source_id=row["source_id"],
+            target_id=row["target_id"],
+            edge_type=EdgeType(row["edge_type"]),
+            confidence=row["confidence"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        )
+
+    def link(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: EdgeType | str,
+        confidence: float = 1.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        """
+        Create a relationship between two context entries.
+
+        Args:
+            source_id: ID of the source entry.
+            target_id: ID of the target entry.
+            edge_type: Type of relationship.
+            confidence: Confidence score (0-1).
+            metadata: Additional metadata.
+
+        Returns:
+            Edge ID if created, None if duplicate or entries don't exist.
+        """
+        # Convert string to EdgeType if needed
+        if isinstance(edge_type, str):
+            edge_type = EdgeType(edge_type)
+
+        edge = ContextEdge(
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            confidence=confidence,
+            metadata=metadata or {},
+        )
+
+        with self._write_transaction() as conn:
+            # Verify both entries exist
+            source_exists = conn.execute(
+                "SELECT 1 FROM context_entries WHERE id = ?", (source_id,)
+            ).fetchone()
+            target_exists = conn.execute(
+                "SELECT 1 FROM context_entries WHERE id = ?", (target_id,)
+            ).fetchone()
+
+            if not source_exists or not target_exists:
+                logger.warning(
+                    f"Cannot create edge: entry not found (source={source_id}, target={target_id})"
+                )
+                return None
+
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO context_edges (
+                        id, source_id, target_id, edge_type, confidence, created_at, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edge.id,
+                        edge.source_id,
+                        edge.target_id,
+                        edge.edge_type.value,
+                        edge.confidence,
+                        edge.created_at.isoformat(),
+                        json.dumps(edge.metadata),
+                    ),
+                )
+                logger.info(
+                    f"Created edge: {edge.source_id} --{edge.edge_type.value}--> {edge.target_id}"
+                )
+                return edge.id
+            except sqlite3.IntegrityError:
+                # Duplicate edge
+                logger.debug(f"Edge already exists: {source_id} -> {target_id} ({edge_type})")
+                return None
+
+    def unlink(self, edge_id: str) -> bool:
+        """
+        Remove a relationship by edge ID.
+
+        Args:
+            edge_id: The ID of the edge to remove.
+
+        Returns:
+            True if edge was found and removed.
+        """
+        with self._write_transaction() as conn:
+            result = conn.execute("DELETE FROM context_edges WHERE id = ?", (edge_id,))
+            if result.rowcount > 0:
+                logger.info(f"Removed edge: {edge_id}")
+                return True
+            return False
+
+    def get_edge(self, edge_id: str) -> ContextEdge | None:
+        """
+        Get a specific edge by ID.
+
+        Args:
+            edge_id: The ID of the edge.
+
+        Returns:
+            The edge if found, None otherwise.
+        """
+        with self._read_transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM context_edges WHERE id = ?", (edge_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_edge(dict(row))
+            return None
+
+    def get_edges(
+        self,
+        entry_id: str,
+        direction: str = "both",
+        edge_type: EdgeType | str | None = None,
+    ) -> list[ContextEdge]:
+        """
+        Get edges connected to an entry.
+
+        Args:
+            entry_id: The entry to get edges for.
+            direction: "outgoing", "incoming", or "both".
+            edge_type: Optional filter by edge type.
+
+        Returns:
+            List of edges connected to the entry.
+
+        Raises:
+            ValueError: If direction is invalid.
+        """
+        # Validate direction
+        if direction not in ("outgoing", "incoming", "both"):
+            raise ValueError(
+                f"Invalid direction: {direction}. Must be 'outgoing', 'incoming', or 'both'"
+            )
+
+        with self._read_transaction() as conn:
+            conditions = []
+            params: list[Any] = []
+
+            if direction == "outgoing":
+                conditions.append("source_id = ?")
+                params.append(entry_id)
+            elif direction == "incoming":
+                conditions.append("target_id = ?")
+                params.append(entry_id)
+            else:  # both
+                conditions.append("(source_id = ? OR target_id = ?)")
+                params.extend([entry_id, entry_id])
+
+            if edge_type:
+                et = EdgeType(edge_type) if isinstance(edge_type, str) else edge_type
+                conditions.append("edge_type = ?")
+                params.append(et.value)
+
+            query = f"""
+                SELECT * FROM context_edges
+                WHERE {" AND ".join(conditions)}
+                ORDER BY created_at DESC
+            """
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_edge(dict(row)) for row in rows]
+
+    def traverse(
+        self,
+        start_id: str,
+        edge_types: list[EdgeType | str] | None = None,
+        direction: str = "outgoing",
+        max_depth: int = 2,
+    ) -> list[dict[str, Any]]:
+        """
+        Traverse the graph from a starting node.
+
+        Args:
+            start_id: Entry ID to start traversal from.
+            edge_types: Filter by edge types (None = all).
+            direction: "outgoing" or "incoming".
+            max_depth: Maximum traversal depth (1-4).
+
+        Returns:
+            List of dicts with entry, depth, path, edge_type, and confidence.
+
+        Raises:
+            ValueError: If direction is invalid.
+        """
+        # Validate direction
+        if direction not in ("outgoing", "incoming"):
+            raise ValueError(
+                f"Invalid direction for traverse: {direction}. Must be 'outgoing' or 'incoming'"
+            )
+
+        max_depth = min(max(1, max_depth), 4)  # Clamp to 1-4
+
+        # Build edge type filter
+        type_filter = ""
+        type_params: list[str] = []
+        if edge_types:
+            type_params = [
+                EdgeType(et).value if isinstance(et, str) else et.value for et in edge_types
+            ]
+            type_placeholders = ",".join("?" * len(type_params))
+            type_filter = f"AND edge_type IN ({type_placeholders})"
+
+        # Direction determines which column to follow
+        if direction == "outgoing":
+            start_col, next_col = "source_id", "target_id"
+        else:
+            start_col, next_col = "target_id", "source_id"
+
+        with self._read_transaction() as conn:
+            # Use window function (ROW_NUMBER) to get deterministic results
+            # This ensures we get the edge_type/confidence from the shortest path
+            query = f"""
+                WITH RECURSIVE traverse_chain AS (
+                    -- Base case: direct connections
+                    SELECT
+                        {next_col} as entry_id,
+                        1 as depth,
+                        {next_col} as path,
+                        edge_type,
+                        confidence
+                    FROM context_edges
+                    WHERE {start_col} = ? {type_filter}
+
+                    UNION ALL
+
+                    -- Recursive case
+                    SELECT
+                        e.{next_col},
+                        tc.depth + 1,
+                        tc.path || ',' || e.{next_col},
+                        e.edge_type,
+                        e.confidence
+                    FROM context_edges e
+                    JOIN traverse_chain tc ON e.{start_col} = tc.entry_id
+                    WHERE tc.depth < ?
+                        AND tc.path NOT LIKE '%' || e.{next_col} || '%'
+                        {type_filter.replace('edge_type', 'e.edge_type') if type_filter else ''}
+                ),
+                ranked AS (
+                    -- Use window function to pick the shortest path for each entry
+                    SELECT
+                        entry_id,
+                        depth,
+                        path,
+                        edge_type,
+                        confidence,
+                        ROW_NUMBER() OVER (PARTITION BY entry_id ORDER BY depth) as rn
+                    FROM traverse_chain
+                )
+                SELECT entry_id, depth as min_depth, path, edge_type, confidence
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY min_depth, entry_id
+            """
+
+            # Build params: start_id, [types], max_depth, [types again for recursive]
+            params: list[Any] = [start_id]
+            params.extend(type_params)
+            params.append(max_depth)
+            params.extend(type_params)
+
+            rows = conn.execute(query, params).fetchall()
+
+            results = []
+            for row in rows:
+                entry = self.get(row["entry_id"])
+                if entry:
+                    results.append(
+                        {
+                            "entry": entry,
+                            "depth": row["min_depth"],
+                            "path": row["path"].split(","),
+                            "edge_type": row["edge_type"],
+                            "confidence": row["confidence"],
+                        }
+                    )
+            return results
+
+    def get_superseded_ids(self) -> set[str]:
+        """
+        Get IDs of all entries that have been superseded by another entry.
+
+        An entry is superseded if there exists a SUPERSEDES edge pointing TO it.
+        (source --SUPERSEDES--> target means target is superseded)
+
+        Returns:
+            Set of entry IDs that are superseded.
+        """
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT target_id FROM context_edges WHERE edge_type = ?",
+                (EdgeType.SUPERSEDES.value,)
+            ).fetchall()
+            return {row["target_id"] for row in rows}
+
+    def get_conflicted_ids(self) -> set[str]:
+        """
+        Get IDs of all entries that have unresolved conflicts.
+
+        Returns:
+            Set of entry IDs involved in CONFLICTS_WITH relationships.
+        """
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT entry_id FROM (
+                    SELECT source_id as entry_id FROM context_edges WHERE edge_type = ?
+                    UNION
+                    SELECT target_id as entry_id FROM context_edges WHERE edge_type = ?
+                )
+                """,
+                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value)
+            ).fetchall()
+            return {row["entry_id"] for row in rows}
+
+    def is_superseded(self, entry_id: str) -> bool:
+        """Check if an entry has been superseded."""
+        with self._read_transaction() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM context_edges WHERE target_id = ? AND edge_type = ? LIMIT 1",
+                (entry_id, EdgeType.SUPERSEDES.value)
+            ).fetchone()
+            return row is not None
+
+    def get_superseding_entry(self, entry_id: str) -> str | None:
+        """Get the ID of the entry that supersedes this one, if any."""
+        with self._read_transaction() as conn:
+            row = conn.execute(
+                "SELECT source_id FROM context_edges WHERE target_id = ? AND edge_type = ? LIMIT 1",
+                (entry_id, EdgeType.SUPERSEDES.value)
+            ).fetchone()
+            return row["source_id"] if row else None
+
+    def health_check(self) -> dict[str, Any]:
+        """
+        Get comprehensive graph health statistics.
+
+        Returns:
+            Dict with health metrics including stale, orphan, conflict, and supersedes info.
+        """
+        now = datetime.now(UTC).replace(tzinfo=None)
+        stale_threshold = now - timedelta(days=180)  # 6 months
+        low_confidence_threshold = 0.5
+
+        with self._read_transaction() as conn:
+            # Basic counts
+            total_entries = conn.execute(
+                "SELECT COUNT(*) FROM context_entries WHERE is_deprecated = 0"
+            ).fetchone()[0]
+            total_edges = conn.execute("SELECT COUNT(*) FROM context_edges").fetchone()[0]
+
+            # Superseded entries
+            superseded_count = conn.execute(
+                """
+                SELECT COUNT(DISTINCT target_id) FROM context_edges
+                WHERE edge_type = ?
+                """,
+                (EdgeType.SUPERSEDES.value,)
+            ).fetchone()[0]
+
+            # Conflicted entries (entries involved in CONFLICTS_WITH edges)
+            conflicted_count = conn.execute(
+                """
+                SELECT COUNT(DISTINCT entry_id) FROM (
+                    SELECT source_id as entry_id FROM context_edges WHERE edge_type = ?
+                    UNION
+                    SELECT target_id as entry_id FROM context_edges WHERE edge_type = ?
+                )
+                """,
+                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value)
+            ).fetchone()[0]
+
+            # Stale entries (not updated in 6 months)
+            stale_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM context_entries
+                WHERE is_deprecated = 0 AND datetime(updated_at) < ?
+                """,
+                (stale_threshold.isoformat(),)
+            ).fetchone()[0]
+
+            # Orphan entries (no edges at all)
+            orphan_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM context_entries ce
+                WHERE is_deprecated = 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM context_edges e
+                    WHERE e.source_id = ce.id OR e.target_id = ce.id
+                )
+                """
+            ).fetchone()[0]
+
+            # Low confidence entries
+            low_confidence_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM context_entries
+                WHERE is_deprecated = 0 AND confidence < ?
+                """,
+                (low_confidence_threshold,)
+            ).fetchone()[0]
+
+            # Never accessed entries
+            never_accessed_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM context_entries
+                WHERE is_deprecated = 0 AND access_count = 0
+                """
+            ).fetchone()[0]
+
+        return {
+            "total_entries": total_entries,
+            "total_edges": total_edges,
+            "superseded_entries": superseded_count,
+            "unresolved_conflicts": conflicted_count // 2,  # Divide by 2 since each conflict involves 2 entries
+            "stale_entries": stale_count,
+            "orphan_entries": orphan_count,
+            "low_confidence_entries": low_confidence_count,
+            "never_accessed_entries": never_accessed_count,
+            "health_score": self._calculate_health_score(
+                total_entries, superseded_count, conflicted_count // 2, stale_count, orphan_count
+            ),
+        }
+
+    def _calculate_health_score(
+        self,
+        total: int,
+        superseded: int,
+        conflicts: int,
+        stale: int,
+        orphans: int,
+    ) -> float:
+        """Calculate overall health score (0-1)."""
+        if total == 0:
+            return 1.0
+
+        # Penalties
+        superseded_penalty = (superseded / total) * 0.2
+        conflict_penalty = (conflicts / total) * 0.3
+        stale_penalty = (stale / total) * 0.3
+        orphan_penalty = (orphans / total) * 0.2
+
+        score = 1.0 - superseded_penalty - conflict_penalty - stale_penalty - orphan_penalty
+        return max(0.0, min(1.0, score))
+
+    def get_stale_entries(self, days_old: int = 180, limit: int = 20) -> list[ContextEntry]:
+        """Get entries that haven't been updated recently."""
+        threshold = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days_old)
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM context_entries
+                WHERE is_deprecated = 0 AND datetime(updated_at) < ?
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (threshold.isoformat(), limit)
+            ).fetchall()
+            entries = [self.get(row["id"]) for row in rows]
+            return [e for e in entries if e is not None]
+
+    def get_orphan_entries(self, limit: int = 20) -> list[ContextEntry]:
+        """Get entries with no graph connections."""
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM context_entries ce
+                WHERE is_deprecated = 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM context_edges e
+                    WHERE e.source_id = ce.id OR e.target_id = ce.id
+                )
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+            entries = [self.get(row["id"]) for row in rows]
+            return [e for e in entries if e is not None]
+
+    def get_conflicted_entries(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Get entries involved in unresolved conflicts with their conflict partners."""
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.source_id, e.target_id, e.confidence, e.metadata
+                FROM context_edges e
+                WHERE e.edge_type = ?
+                LIMIT ?
+                """,
+                (EdgeType.CONFLICTS_WITH.value, limit)
+            ).fetchall()
+
+            results = []
+            for row in rows:
+                source = self.get(row["source_id"])
+                target = self.get(row["target_id"])
+                if source and target:
+                    results.append({
+                        "entry1": source,
+                        "entry2": target,
+                        "confidence": row["confidence"],
+                    })
+            return results
+
+    def _create_version(
+        self,
+        entry: ContextEntry,
+        change_type: str,
+        version: int | None = None,
+    ) -> str:
+        """Create a version history record for an entry."""
+        if version is None:
+            # Get next version number
+            with self._read_transaction() as conn:
+                row = conn.execute(
+                    "SELECT MAX(version) FROM context_versions WHERE entry_id = ?",
+                    (entry.id,)
+                ).fetchone()
+                version = (row[0] or 0) + 1
+
+        version_id = str(uuid.uuid4())
+        now = datetime.now(UTC).replace(tzinfo=None)
+
+        with self._write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO context_versions (
+                    id, entry_id, version, content, content_type,
+                    confidence, tags, changed_at, change_type, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    entry.id,
+                    version,
+                    entry.content,
+                    entry.content_type.value,
+                    entry.confidence,
+                    json.dumps(entry.tags),
+                    now.isoformat(),
+                    change_type,
+                    json.dumps(entry.metadata),
+                ),
+            )
+        return version_id
+
+    def get_history(
+        self,
+        entry_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """
+        Get version history for an entry.
+
+        Args:
+            entry_id: The entry to get history for.
+            limit: Maximum number of versions to return.
+
+        Returns:
+            List of version records, newest first.
+        """
+        with self._read_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, version, content, content_type, confidence,
+                       tags, changed_at, change_type, metadata
+                FROM context_versions
+                WHERE entry_id = ?
+                ORDER BY version DESC
+                LIMIT ?
+                """,
+                (entry_id, limit)
+            ).fetchall()
+
+            return [
+                {
+                    "version_id": row["id"],
+                    "version": row["version"],
+                    "content": row["content"],
+                    "content_type": row["content_type"],
+                    "confidence": row["confidence"],
+                    "tags": json.loads(row["tags"]),
+                    "changed_at": row["changed_at"],
+                    "change_type": row["change_type"],
+                    "metadata": json.loads(row["metadata"]),
+                }
+                for row in rows
+            ]
+
+    def track_usage(
+        self,
+        entry_id: str,
+        event_type: str,
+        query: str | None = None,
+        result_rank: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Track a usage event for analytics."""
+        event_id = str(uuid.uuid4())
+        now = datetime.now(UTC).replace(tzinfo=None)
+
+        with self._write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO context_analytics (
+                    id, entry_id, event_type, event_at, query, result_rank, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    entry_id,
+                    event_type,
+                    now.isoformat(),
+                    query,
+                    result_rank,
+                    json.dumps(metadata or {}),
+                ),
+            )
+
+    def get_analytics(
+        self,
+        entry_id: str | None = None,
+        event_type: str | None = None,
+        days: int = 30,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """
+        Get usage analytics.
+
+        Args:
+            entry_id: Filter by specific entry (optional).
+            event_type: Filter by event type (optional).
+            days: How many days of history to include.
+            limit: Maximum events to return.
+
+        Returns:
+            Dict with analytics data.
+        """
+        since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
+
+        query = """
+            SELECT entry_id, event_type, COUNT(*) as count
+            FROM context_analytics
+            WHERE datetime(event_at) >= ?
+        """
+        params: list[Any] = [since.isoformat()]
+
+        if entry_id:
+            query += " AND entry_id = ?"
+            params.append(entry_id)
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+
+        query += " GROUP BY entry_id, event_type ORDER BY count DESC LIMIT ?"
+        params.append(limit)
+
+        with self._read_transaction() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+            # Also get top accessed entries
+            top_rows = conn.execute(
+                """
+                SELECT entry_id, COUNT(*) as recall_count
+                FROM context_analytics
+                WHERE event_type = 'recall' AND datetime(event_at) >= ?
+                GROUP BY entry_id
+                ORDER BY recall_count DESC
+                LIMIT 10
+                """,
+                (since.isoformat(),)
+            ).fetchall()
+
+            return {
+                "period_days": days,
+                "events_by_type": [
+                    {"entry_id": r["entry_id"], "event_type": r["event_type"], "count": r["count"]}
+                    for r in rows
+                ],
+                "top_recalled": [
+                    {"entry_id": r["entry_id"], "recall_count": r["recall_count"]}
+                    for r in top_rows
+                ],
+            }
+
+    def _appears_contradictory(self, new_content: str, existing_content: str) -> bool:
+        """
+        Simple heuristic to detect potential contradictions.
+
+        Returns True if content appears to contradict.
+        """
+        new_lower = new_content.lower()
+        existing_lower = existing_content.lower()
+
+        # Check for negation patterns
+        negation_words = ["not", "never", "don't", "doesn't", "shouldn't", "won't", "cannot", "disable"]
+        new_has_negation = any(word in new_lower for word in negation_words)
+        existing_has_negation = any(word in existing_lower for word in negation_words)
+
+        # If one has negation and other doesn't, might be contradiction
+        if new_has_negation != existing_has_negation:
+            return True
+
+        # Check for opposing values in common patterns
+        # e.g., "use React" vs "use Vue"
+        use_pattern_words = ["use ", "prefer ", "chose ", "selected "]
+        for pattern in use_pattern_words:
+            if pattern in new_lower and pattern in existing_lower:
+                # Extract what follows the pattern
+                new_choice = new_lower.split(pattern)[-1].split()[0] if pattern in new_lower else ""
+                existing_choice = existing_lower.split(pattern)[-1].split()[0] if pattern in existing_lower else ""
+                if new_choice and existing_choice and new_choice != existing_choice:
+                    return True
+
+        return False
 
     def close(self) -> None:
         """Close all database connections."""
