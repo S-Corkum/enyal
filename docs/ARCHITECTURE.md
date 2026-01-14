@@ -1,8 +1,8 @@
 # Enyal Architecture Document
 
-> **Version:** 1.0.0-draft
-> **Last Updated:** December 2024
-> **Status:** Pending Review
+> **Version:** 1.1.0
+> **Last Updated:** January 2026
+> **Status:** Implemented
 
 ## Executive Summary
 
@@ -117,7 +117,7 @@ def create_connection(db_path: str) -> sqlite3.Connection:
 - **Pure C:** Runs anywhere SQLite runs—perfect cross-platform support
 - **Small footprint:** ~200KB extension
 - **Multiple vector types:** float32, int8, binary quantization
-- **Hybrid search ready:** Combine with FTS5 for keyword+semantic search
+- **Hybrid search implemented:** Combined with FTS5 for keyword+semantic search
 
 **Trade-offs:**
 - Newer project (less battle-tested than faiss/hnswlib)
@@ -180,6 +180,70 @@ SELECT entry_id, vec_distance_L2(embedding, ?) as distance
 FROM coarse_matches
 ORDER BY distance
 LIMIT 10;
+```
+
+### Hybrid Search Implementation
+
+Enyal implements hybrid search combining semantic (vector) similarity with keyword (FTS5) matching and recency weighting.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Hybrid Search Pipeline                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Query: "how to write tests"                                    │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Parallel Search Paths                       │    │
+│  │  ┌─────────────────┐      ┌─────────────────┐           │    │
+│  │  │ Semantic Search │      │  FTS5 Keyword   │           │    │
+│  │  │ (sqlite-vec)    │      │   (BM25)        │           │    │
+│  │  │ Weight: 0.6     │      │ Weight: 0.3     │           │    │
+│  │  └────────┬────────┘      └────────┬────────┘           │    │
+│  └───────────┼───────────────────────┼──────────────────────┘    │
+│              │                       │                           │
+│              ▼                       ▼                           │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                  Score Combination                         │  │
+│  │                                                            │  │
+│  │  combined = (semantic × 0.6) + (keyword × 0.3)             │  │
+│  │           + (recency × 0.1) × effective_confidence         │  │
+│  │                                                            │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│              │                                                   │
+│              ▼                                                   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              Ranked Results                                │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Score Weights:**
+- **Semantic (0.6):** Vector cosine similarity captures meaning
+- **Keyword (0.3):** BM25 exact term matching catches specific terminology
+- **Recency (0.1):** Exponential decay favors recently updated entries
+
+**BM25 Score Normalization:**
+```python
+def _normalize_bm25(self, bm25_score: float) -> float:
+    """Normalize BM25 score to 0-1 range.
+
+    BM25 returns negative scores where more negative = better match.
+    Convert: -10 → ~0.91, -5 → ~0.83, -1 → ~0.5, 0 → 0
+    """
+    return 1.0 / (1.0 + abs(bm25_score)) if bm25_score < 0 else 0.0
+```
+
+**FTS5 Query Escaping:**
+```python
+def _escape_fts_query(query: str) -> str:
+    """Escape FTS5 special characters for literal matching."""
+    # Remove operators: ", *, :
+    cleaned = query.replace('"', " ").replace("*", " ").replace(":", " ")
+    cleaned = " ".join(cleaned.split())
+    return f'"{cleaned}"' if cleaned else '""'
 ```
 
 ---
@@ -361,6 +425,66 @@ def calculate_confidence(
 
     return min(1.0, base_confidence * decay_factor + access_boost)
 ```
+
+### Content Deduplication
+
+Enyal supports optional duplicate detection when storing new context, preventing redundant entries.
+
+**Detection Method:**
+Uses vector similarity search to find entries semantically similar to new content before storing.
+
+```python
+def find_similar(
+    self,
+    content: str,
+    threshold: float = 0.85,
+    limit: int = 5,
+    exclude_deprecated: bool = True,
+) -> list[dict[str, Any]]:
+    """Find entries similar to the given content.
+
+    Args:
+        content: Text to find similar entries for.
+        threshold: Minimum similarity (1 - distance) to include.
+        limit: Maximum results to return.
+        exclude_deprecated: Skip soft-deleted entries.
+
+    Returns:
+        List of dicts with entry, similarity, and distance.
+    """
+```
+
+**Deduplication Actions:**
+
+| Action | Behavior |
+|--------|----------|
+| `reject` | Return existing entry, don't store new |
+| `merge` | Update existing entry with new content (re-embeds) |
+| `store` | Store as new entry despite similarity |
+
+**Implementation:**
+```python
+def remember(
+    self,
+    content: str,
+    # ... existing params ...
+    check_duplicate: bool = False,
+    duplicate_threshold: float = 0.85,
+    on_duplicate: str = "reject",  # "reject", "merge", "store"
+) -> str | dict[str, Any]:
+    """Store context with optional duplicate detection.
+
+    Returns:
+        str: entry_id if stored/merged
+        dict: {"entry_id": id, "action": "existing"|"merged"|"stored",
+               "similarity": float} if duplicate detected
+    """
+```
+
+**Use Cases:**
+1. **AI agent self-correction:** Prevent storing variations of the same fact
+2. **Batch imports:** Detect and skip already-known content
+3. **User feedback loop:** Identify when user restates existing context
 
 ---
 
@@ -614,6 +738,69 @@ session = ort.InferenceSession("model_onnx/model.onnx")
 
 ---
 
+## 5.1 Retrieval Engine
+
+The `RetrievalEngine` provides a high-level API for hybrid search, sitting above the `ContextStore`.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    MCP Tools Layer                            │
+│  enyal_recall  │  enyal_recall_by_scope  │  enyal_get         │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                   RetrievalEngine                             │
+│  • Hybrid search (semantic + keyword + recency)               │
+│  • Scope-aware search                                         │
+│  • Effective confidence calculation                           │
+│  • Related entry discovery                                    │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     ContextStore                              │
+│  • Vector search (sqlite-vec)                                 │
+│  • FTS5 keyword search                                        │
+│  • CRUD operations                                            │
+│  • Duplicate detection                                        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Key Methods
+
+| Method | Purpose |
+|--------|---------|
+| `search()` | Hybrid semantic + keyword search with filters |
+| `search_by_scope()` | Scope-aware search from file → global |
+| `get_related()` | Find entries related to a given entry |
+
+### Scope-Aware Search
+
+`search_by_scope()` automatically resolves applicable scopes from a file path:
+
+```python
+def search_by_scope(
+    self,
+    query: str,
+    file_path: str | Path,
+    limit: int = 10,
+    min_confidence: float = 0.3,
+) -> list[ContextSearchResult]:
+    """Search with automatic scope resolution.
+
+    Searches file → project → workspace → global, weighting
+    results by scope specificity.
+    """
+    scopes = self._get_applicable_scopes(Path(file_path))
+    scope_weights = {"file": 1.0, "project": 0.9, "workspace": 0.8, "global": 0.7}
+    # ... combine results from all scopes
+```
+
+---
+
 ## 6. MCP Server Implementation
 
 ### Decision: FastMCP
@@ -671,9 +858,23 @@ class RememberInput(BaseModel):
         default_factory=list,
         description="Tags for categorization"
     )
+    # Deduplication options
+    check_duplicate: bool = Field(
+        default=False,
+        description="Enable duplicate detection before storing"
+    )
+    duplicate_threshold: float = Field(
+        default=0.85,
+        ge=0.0, le=1.0,
+        description="Similarity threshold for duplicate detection"
+    )
+    on_duplicate: str = Field(
+        default="reject",
+        description="Action on duplicate: 'reject', 'merge', or 'store'"
+    )
 
 class RecallInput(BaseModel):
-    query: str = Field(description="Search query (semantic)")
+    query: str = Field(description="Search query (semantic + keyword hybrid)")
     limit: int = Field(default=10, ge=1, le=100, description="Max results")
     scope: Optional[str] = Field(
         default=None,
@@ -690,6 +891,36 @@ class RecallInput(BaseModel):
         description="Minimum confidence threshold"
     )
 
+class RecallByScopeInput(BaseModel):
+    query: str = Field(description="Natural language search query")
+    file_path: str = Field(
+        description="Current file path for automatic scope resolution"
+    )
+    limit: int = Field(default=10, ge=1, le=100, description="Max results")
+    min_confidence: float = Field(
+        default=0.3,
+        ge=0,
+        le=1,
+        description="Minimum confidence threshold"
+    )
+
+class UpdateInput(BaseModel):
+    entry_id: str = Field(description="ID of entry to update")
+    content: Optional[str] = Field(
+        default=None,
+        description="New content (regenerates embedding)"
+    )
+    confidence: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="New confidence score"
+    )
+    tags: Optional[list[str]] = Field(
+        default=None,
+        description="New tags (replaces existing)"
+    )
+
 @mcp.tool()
 def enyal_remember(input: RememberInput) -> dict:
     """
@@ -697,36 +928,95 @@ def enyal_remember(input: RememberInput) -> dict:
 
     Use this to save facts, preferences, decisions, conventions,
     or patterns that should persist across sessions.
+
+    Supports optional duplicate detection with configurable threshold
+    and action (reject, merge, or store anyway).
     """
     store = get_context_store()
-    entry_id = store.remember(
+    result = store.remember(
         content=input.content,
         content_type=input.content_type,
         scope_level=input.scope,
         scope_path=input.scope_path,
         source_type="conversation",
         source_ref=input.source,
-        tags=input.tags
+        tags=input.tags,
+        check_duplicate=input.check_duplicate,
+        duplicate_threshold=input.duplicate_threshold,
+        on_duplicate=input.on_duplicate
     )
-    return {"success": True, "entry_id": entry_id}
+    # Returns entry_id or dict with action/similarity info for duplicates
+    if isinstance(result, str):
+        return {"success": True, "entry_id": result}
+    return {"success": True, **result}
 
 @mcp.tool()
 def enyal_recall(input: RecallInput) -> list[dict]:
     """
     Search Enyal's memory for relevant context.
 
-    Uses semantic search to find entries similar to the query,
+    Uses hybrid search combining semantic similarity and keyword matching
     with optional filtering by scope and content type.
     """
-    store = get_context_store()
-    results = store.recall(
+    retrieval = get_retrieval_engine()
+    results = retrieval.search(
         query=input.query,
         limit=input.limit,
         scope_level=input.scope,
         content_type=input.content_type,
         min_confidence=input.min_confidence
     )
-    return results
+    return [result.to_dict() for result in results]
+
+@mcp.tool()
+def enyal_recall_by_scope(input: RecallByScopeInput) -> dict:
+    """
+    Search Enyal's memory with automatic scope resolution.
+
+    Searches from most specific (file) to most general (global) scope,
+    returning results weighted by scope specificity.
+    """
+    retrieval = get_retrieval_engine()
+    results = retrieval.search_by_scope(
+        query=input.query,
+        file_path=input.file_path,
+        limit=input.limit,
+        min_confidence=input.min_confidence
+    )
+    return {
+        "results": [r.to_dict() for r in results],
+        "scopes_searched": ["file", "project", "workspace", "global"]
+    }
+
+@mcp.tool()
+def enyal_update(input: UpdateInput) -> dict:
+    """
+    Update an existing context entry.
+
+    Use this to correct content, adjust confidence, or update tags.
+    If content is updated, the embedding is automatically regenerated.
+    """
+    store = get_context_store()
+    success = store.update(
+        entry_id=input.entry_id,
+        content=input.content,
+        confidence=input.confidence,
+        tags=input.tags
+    )
+    return {"success": success, "entry_id": input.entry_id}
+
+@mcp.tool()
+def enyal_get(entry_id: str) -> dict:
+    """
+    Get a specific context entry by ID.
+
+    Returns full details of the entry including all metadata.
+    """
+    store = get_context_store()
+    entry = store.get(entry_id)
+    if entry:
+        return {"success": True, "entry": entry.to_dict()}
+    return {"success": False, "error": "Entry not found"}
 
 @mcp.tool()
 def enyal_forget(entry_id: str, hard_delete: bool = False) -> dict:
@@ -934,4 +1224,4 @@ The architecture supports future additions:
 
 ---
 
-*Document prepared for architecture review. Awaiting approval before Phase 2 implementation.*
+*Document reflects the implemented architecture as of January 2026. Hybrid search, content deduplication, and scope-aware retrieval are fully functional.*

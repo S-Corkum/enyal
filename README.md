@@ -269,8 +269,9 @@ See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for detailed platform-specific 
 
 | Tool | Description |
 |------|-------------|
-| **enyal_remember** | Store new context with metadata (facts, preferences, decisions, conventions, patterns) |
+| **enyal_remember** | Store new context with optional duplicate detection and merging |
 | **enyal_recall** | Semantic search for relevant context with filtering by scope and type |
+| **enyal_recall_by_scope** | Scope-aware search that automatically finds context relevant to the current file/project |
 | **enyal_forget** | Remove or deprecate context (soft-delete by default, hard-delete optional) |
 | **enyal_update** | Update existing entries (content, confidence, tags) |
 | **enyal_get** | Retrieve a specific entry by ID with full metadata |
@@ -345,7 +346,16 @@ entry_id = store.remember(
     tags=["testing", "pytest"]
 )
 
-# Recall relevant context
+# Remember with duplicate detection
+result = store.remember(
+    content="Use pytest for all testing",  # Similar to existing
+    check_duplicate=True,           # Enable duplicate checking
+    duplicate_threshold=0.85,       # Similarity threshold
+    on_duplicate="reject"           # "reject", "merge", or "store"
+)
+# Returns dict: {"entry_id": "...", "action": "existing", "similarity": 0.92}
+
+# Recall relevant context (hybrid semantic + keyword search)
 results = retrieval.search(
     query="how should I write tests?",
     limit=5,
@@ -354,6 +364,20 @@ results = retrieval.search(
 
 for result in results:
     print(f"{result.score:.2f}: {result.entry.content}")
+
+# Scope-aware search (file → project → workspace → global)
+results = retrieval.search_by_scope(
+    query="testing conventions",
+    file_path="/Users/dev/myproject/src/auth.py",
+    limit=5
+)
+
+# Find similar entries (useful for deduplication checks)
+similar = store.find_similar(
+    content="pytest testing conventions",
+    threshold=0.8,
+    limit=3
+)
 
 # Update context
 store.update(entry_id, confidence=0.9, tags=["testing", "pytest", "unit-tests"])

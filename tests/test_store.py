@@ -329,3 +329,160 @@ class TestContextStore:
         assert entry is not None
         assert entry.content_type == ContextType.DECISION
         assert entry.scope_level == ScopeLevel.FILE
+
+
+class TestFTSSearch:
+    """Tests for FTS5 full-text search."""
+
+    def test_fts_search_basic(self, store: ContextStore) -> None:
+        """Test basic FTS search functionality."""
+        store.remember(content="Python programming language")
+        store.remember(content="JavaScript for web development")
+
+        results = store.fts_search("Python", limit=10)
+
+        assert len(results) >= 1
+        assert any("Python" in store.get(r["entry_id"]).content for r in results)
+
+    def test_fts_search_special_characters(self, store: ContextStore) -> None:
+        """Test FTS search with special characters in query."""
+        store.remember(content="Use pytest-cov for coverage")
+
+        # Query with special chars should not break
+        results = store.fts_search('pytest "cov"', limit=10)
+
+        # Should return results (empty or matching)
+        assert isinstance(results, list)
+
+    def test_fts_search_excludes_deprecated(self, store: ContextStore) -> None:
+        """Test that FTS excludes deprecated entries by default."""
+        entry_id = store.remember(content="Deprecated FTS content")
+        store.forget(entry_id, hard_delete=False)
+
+        results = store.fts_search("Deprecated FTS", limit=10)
+
+        assert not any(r["entry_id"] == entry_id for r in results)
+
+    def test_fts_search_includes_deprecated(self, store: ContextStore) -> None:
+        """Test FTS can include deprecated entries."""
+        entry_id = store.remember(content="Deprecated but searchable")
+        store.forget(entry_id, hard_delete=False)
+
+        results = store.fts_search("Deprecated but searchable", limit=10, include_deprecated=True)
+
+        assert any(r["entry_id"] == entry_id for r in results)
+
+    def test_fts_search_empty_results(self, store: ContextStore) -> None:
+        """Test FTS with no matching results."""
+        store.remember(content="Some unrelated content")
+
+        results = store.fts_search("xyznonexistent", limit=10)
+
+        assert results == []
+
+
+class TestFindSimilar:
+    """Tests for find_similar method."""
+
+    def test_find_similar_basic(self, store: ContextStore) -> None:
+        """Test basic find_similar functionality."""
+        store.remember(content="Python is a programming language")
+
+        similar = store.find_similar(
+            content="Python programming language",
+            threshold=0.5,
+        )
+
+        assert len(similar) >= 1
+        assert similar[0]["similarity"] >= 0.5
+
+    def test_find_similar_threshold(self, store: ContextStore) -> None:
+        """Test that threshold filters results."""
+        store.remember(content="JavaScript for web development")
+
+        # Very high threshold should exclude most results
+        similar = store.find_similar(
+            content="Rust systems programming",  # Different topic
+            threshold=0.99,
+        )
+
+        assert len(similar) == 0
+
+    def test_find_similar_excludes_deprecated(self, store: ContextStore) -> None:
+        """Test that find_similar excludes deprecated entries."""
+        entry_id = store.remember(content="Deprecated similar content")
+        store.forget(entry_id, hard_delete=False)
+
+        similar = store.find_similar(
+            content="Deprecated similar content",
+            threshold=0.5,
+        )
+
+        assert not any(s["entry_id"] == entry_id for s in similar)
+
+
+class TestRememberDeduplication:
+    """Tests for remember with deduplication."""
+
+    def test_remember_dedup_reject(self, store: ContextStore) -> None:
+        """Test that duplicate is rejected and existing ID returned."""
+        original_id = store.remember(content="Original unique content here")
+
+        result = store.remember(
+            content="Original unique content here",  # Exact duplicate
+            check_duplicate=True,
+            duplicate_threshold=0.85,
+            on_duplicate="reject",
+        )
+
+        assert isinstance(result, dict)
+        assert result["action"] == "existing"
+        assert result["entry_id"] == original_id
+        assert result["similarity"] >= 0.85
+
+    def test_remember_dedup_merge(self, store: ContextStore) -> None:
+        """Test that duplicate is merged with existing entry."""
+        original_id = store.remember(
+            content="Content to be merged",
+            tags=["original"],
+            confidence=0.8,
+        )
+
+        result = store.remember(
+            content="Content to be merged",
+            tags=["new"],
+            confidence=0.9,
+            check_duplicate=True,
+            on_duplicate="merge",
+        )
+
+        assert result["action"] == "merged"
+
+        # Check that tags were merged and confidence updated
+        entry = store.get(original_id)
+        assert "original" in entry.tags
+        assert "new" in entry.tags
+        assert entry.confidence == 0.9  # Max of 0.8 and 0.9
+
+    def test_remember_dedup_store(self, store: ContextStore) -> None:
+        """Test that duplicate is stored anyway when on_duplicate='store'."""
+        original_id = store.remember(content="Force store duplicate")
+
+        result = store.remember(
+            content="Force store duplicate",
+            check_duplicate=True,
+            on_duplicate="store",
+        )
+
+        assert result["action"] == "created"
+        assert result["entry_id"] != original_id
+
+    def test_remember_dedup_disabled(self, store: ContextStore) -> None:
+        """Test that dedup check is skipped when disabled."""
+        store.remember(content="No dedup check")
+
+        # Default check_duplicate=False should store without checking
+        result = store.remember(content="No dedup check")
+
+        # Returns string, not dict
+        assert isinstance(result, str)

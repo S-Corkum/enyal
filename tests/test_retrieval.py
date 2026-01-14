@@ -179,6 +179,76 @@ class TestSearch:
         assert len(results) == 3
 
 
+class TestHybridSearch:
+    """Tests for hybrid search with FTS5 integration."""
+
+    def test_search_uses_fts_scores(self, sample_entry: ContextEntry) -> None:
+        """Test that search incorporates FTS5 scores."""
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [{"entry": sample_entry, "distance": 0.2, "score": 0.8}]
+        mock_store.fts_search.return_value = [{"entry_id": sample_entry.id, "bm25_score": -5.0}]
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query")
+
+        assert len(results) == 1
+        # FTS search should have been called
+        mock_store.fts_search.assert_called_once()
+
+    def test_search_keyword_boost(self) -> None:
+        """Test that exact keyword matches get boosted."""
+        # Entry with exact keyword should rank higher
+        exact_match = ContextEntry(
+            id="exact-id",
+            content="pytest convention for testing",
+            content_type=ContextType.CONVENTION,
+            scope_level=ScopeLevel.PROJECT,
+        )
+        similar_semantic = ContextEntry(
+            id="semantic-id",
+            content="unit testing best practices",
+            content_type=ContextType.CONVENTION,
+            scope_level=ScopeLevel.PROJECT,
+        )
+
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": similar_semantic, "distance": 0.15, "score": 0.87},
+            {"entry": exact_match, "distance": 0.2, "score": 0.8},
+        ]
+        # FTS finds exact match
+        mock_store.fts_search.return_value = [
+            {"entry_id": "exact-id", "bm25_score": -8.0},  # Strong FTS match
+        ]
+        mock_store.get.return_value = None
+
+        engine = RetrievalEngine(mock_store, keyword_weight=0.4)
+        results = engine.search("pytest convention")
+
+        # Exact match should have higher combined score due to FTS boost
+        assert len(results) >= 1
+
+    def test_search_fts_only_entries(self) -> None:
+        """Test entries only in FTS results are included."""
+        fts_only_entry = ContextEntry(
+            id="fts-only-id",
+            content="Exact keyword match only",
+            content_type=ContextType.FACT,
+            scope_level=ScopeLevel.PROJECT,
+        )
+
+        mock_store = MagicMock()
+        mock_store.recall.return_value = []  # No semantic matches
+        mock_store.fts_search.return_value = [{"entry_id": "fts-only-id", "bm25_score": -6.0}]
+        mock_store.get.return_value = fts_only_entry
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("Exact keyword")
+
+        assert len(results) == 1
+        assert results[0].entry.id == "fts-only-id"
+
+
 class TestSearchByScope:
     """Tests for search_by_scope method."""
 

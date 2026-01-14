@@ -267,6 +267,9 @@ class TestEnyalRemember:
                 source_type="conversation",
                 source_ref="session-abc",
                 tags=["important", "architecture"],
+                check_duplicate=False,
+                duplicate_threshold=0.85,
+                on_duplicate="reject",
             )
 
     def test_enyal_remember_error(self, server_module) -> None:
@@ -571,3 +574,96 @@ class TestEnyalGet:
 
             assert result["success"] is False
             assert "error" in result
+
+
+class TestEnyalRecallByScope:
+    """Tests for enyal_recall_by_scope tool."""
+
+    def test_enyal_recall_by_scope_success(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test successful recall by scope operation."""
+        mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
+
+        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
+            mock_retrieval = MagicMock()
+            mock_retrieval.search_by_scope.return_value = [mock_result]
+            mock_get_retrieval.return_value = mock_retrieval
+
+            input_data = server_module.RecallByScopeInput(
+                query="test query",
+                file_path="/path/to/file.py",
+            )
+
+            result = server_module.enyal_recall_by_scope(input_data)
+
+            assert result["success"] is True
+            assert result["count"] == 1
+            mock_retrieval.search_by_scope.assert_called_once()
+
+    def test_enyal_recall_by_scope_error(self, server_module) -> None:
+        """Test recall by scope with error."""
+        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
+            mock_retrieval = MagicMock()
+            mock_retrieval.search_by_scope.side_effect = Exception("Scope error")
+            mock_get_retrieval.return_value = mock_retrieval
+
+            input_data = server_module.RecallByScopeInput(
+                query="test",
+                file_path="/path/to/file.py",
+            )
+
+            result = server_module.enyal_recall_by_scope(input_data)
+
+            assert result["success"] is False
+            assert "error" in result
+
+
+class TestEnyalRememberDedup:
+    """Tests for enyal_remember with deduplication."""
+
+    def test_enyal_remember_dedup_reject(self, server_module) -> None:
+        """Test remember with duplicate rejection."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.remember.return_value = {
+                "entry_id": "existing-id",
+                "action": "existing",
+                "duplicate_of": "existing-id",
+                "similarity": 0.92,
+            }
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.RememberInput(
+                content="Duplicate content",
+                check_duplicate=True,
+                on_duplicate="reject",
+            )
+
+            result = server_module.enyal_remember(input_data)
+
+            assert result["success"] is True
+            assert result["action"] == "existing"
+            assert result["duplicate_of"] == "existing-id"
+            assert "similarity" in result["message"]
+
+    def test_enyal_remember_dedup_created(self, server_module) -> None:
+        """Test remember creates new entry when no duplicate."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.remember.return_value = {
+                "entry_id": "new-entry-id",
+                "action": "created",
+                "duplicate_of": None,
+                "similarity": None,
+            }
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.RememberInput(
+                content="Unique content",
+                check_duplicate=True,
+            )
+
+            result = server_module.enyal_remember(input_data)
+
+            assert result["success"] is True
+            assert result["action"] == "created"
+            assert result["entry_id"] == "new-entry-id"

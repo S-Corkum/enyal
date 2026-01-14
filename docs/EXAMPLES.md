@@ -8,10 +8,13 @@ This guide provides practical workflows and examples for using Enyal with AI cod
 2. [Architecture Decision Records](#architecture-decision-records)
 3. [Code Review Context](#code-review-context)
 4. [Multi-Project Knowledge Base](#multi-project-knowledge-base)
-5. [Team Onboarding](#team-onboarding)
-6. [Debugging Context](#debugging-context)
-7. [API Documentation Context](#api-documentation-context)
-8. [Testing Strategy Context](#testing-strategy-context)
+5. [Scope-Aware Search](#scope-aware-search)
+6. [Duplicate Detection](#duplicate-detection)
+7. [Entry Management](#entry-management)
+8. [Team Onboarding](#team-onboarding)
+9. [Debugging Context](#debugging-context)
+10. [API Documentation Context](#api-documentation-context)
+11. [Testing Strategy Context](#testing-strategy-context)
 
 ---
 
@@ -53,11 +56,21 @@ Store and recall coding conventions to ensure consistency across your codebase.
 
 ### Updating Conventions
 
+Add a new convention:
+
     You: Actually, let's use PascalCase for React components
 
     Assistant: [Calls enyal_remember]
     I have added a new convention: Use PascalCase for React component names.
     This complements your existing camelCase convention for regular variables.
+
+Modify an existing convention:
+
+    You: Update the JavaScript naming convention to specify it's for variables and functions
+
+    Assistant: [Calls enyal_recall to find the entry, then enyal_update]
+    I have updated the existing convention. It now reads:
+    "Use camelCase for JavaScript variables and functions"
 
 ---
 
@@ -180,6 +193,245 @@ When you ask a question, Enyal automatically searches from most specific to most
     Assistant: [Calls enyal_recall - searches file -> project -> workspace -> global]
     For this project, you should use REST because it is customer-facing.
     (Note: Other projects in your microservices workspace use gRPC)
+
+---
+
+## Scope-Aware Search
+
+Automatically search context relevant to your current file location.
+
+### Automatic Context Resolution
+
+The `enyal_recall_by_scope` tool automatically determines applicable scopes based on your current file:
+
+    You: [Working in /Users/dev/myapp/src/api/auth.py]
+        What conventions apply to this file?
+
+    Assistant: [Calls enyal_recall_by_scope with file_path="/Users/dev/myapp/src/api/auth.py"]
+    Based on context from all applicable scopes:
+
+    From file scope (/Users/dev/myapp/src/api/auth.py):
+    - This file handles JWT token validation
+
+    From project scope (/Users/dev/myapp):
+    - Use PostgreSQL for user data
+    - All API endpoints return JSON
+
+    From workspace scope (/Users/dev):
+    - Use gRPC for inter-service communication
+
+    From global scope:
+    - Prefer 4-space indentation
+
+### Scope Priority
+
+Results are weighted by specificity—file-level context ranks higher than global:
+
+    You: [Working in /Users/dev/myapp/src/api/users.py]
+        What database should I use?
+
+    Assistant: [Calls enyal_recall_by_scope with query "database"]
+    For this file, you should use PostgreSQL.
+
+    This comes from your project-level decision (higher priority than
+    any global preferences).
+
+### IDE Integration
+
+When your AI assistant knows your current file, it can automatically use scope-aware search:
+
+    You: How should I handle errors here?
+
+    Assistant: [Calls enyal_recall_by_scope with current file context]
+    Based on conventions for this project:
+    - Return {error: string, code: number} format
+    - Log errors to the centralized logging service
+    - Use HTTP 4xx for client errors, 5xx for server errors
+
+---
+
+## Duplicate Detection
+
+Prevent storing redundant or near-duplicate context.
+
+### Basic Duplicate Detection
+
+Enable duplicate checking when storing new context:
+
+    You: Remember that we use pytest for testing
+
+    Assistant: [Calls enyal_remember with check_duplicate=true]
+    I found an existing similar entry (92% match):
+    "Always use pytest for testing in this project"
+
+    I have not stored the duplicate. The existing entry covers this.
+
+### Duplicate Actions
+
+Control what happens when a duplicate is detected:
+
+**Reject (default):** Don't store, return existing entry
+
+    You: Remember that we use 4-space indentation
+
+    Assistant: [Calls enyal_remember with check_duplicate=true, on_duplicate="reject"]
+    This is already stored (89% match). Keeping the existing entry:
+    "Use 4-space indentation for all Python files"
+
+**Merge:** Update existing entry with new content
+
+    You: Remember that we use pytest with coverage reporting
+
+    Assistant: [Calls enyal_remember with check_duplicate=true, on_duplicate="merge"]
+    I found a similar entry about pytest (87% match). I have merged your
+    new information into the existing entry, which now reads:
+    "Use pytest with coverage reporting for all testing"
+
+**Store:** Store as new entry despite similarity
+
+    You: Remember that the auth service also uses pytest (store even if similar)
+
+    Assistant: [Calls enyal_remember with check_duplicate=true, on_duplicate="store"]
+    I found a similar entry (85% match) but stored this as a separate entry
+    as requested, since it's specific to the auth service.
+
+### Adjusting Sensitivity
+
+Control the similarity threshold (default 0.85 = 85%):
+
+**Via Python:**
+
+```python
+# Strict matching (90% similarity required)
+store.remember(
+    content="Use black for formatting",
+    check_duplicate=True,
+    duplicate_threshold=0.90,
+    on_duplicate="reject"
+)
+
+# Loose matching (70% similarity triggers duplicate detection)
+store.remember(
+    content="Format code with black",
+    check_duplicate=True,
+    duplicate_threshold=0.70,
+    on_duplicate="merge"
+)
+```
+
+### Batch Import Deduplication
+
+When importing multiple entries, use duplicate detection to avoid redundancy:
+
+**Via Python:**
+
+```python
+conventions = [
+    "Use pytest for testing",
+    "Use black for code formatting",
+    "Use pytest for unit tests",  # Near-duplicate of first
+    "Format Python with black",   # Near-duplicate of second
+]
+
+for conv in conventions:
+    result = store.remember(
+        content=conv,
+        content_type="convention",
+        check_duplicate=True,
+        on_duplicate="reject"
+    )
+    if isinstance(result, dict) and result.get("action") == "existing":
+        print(f"Skipped duplicate: {conv}")
+```
+
+---
+
+## Entry Management
+
+Retrieve, update, and manage individual context entries.
+
+### Getting a Specific Entry
+
+Retrieve full details of an entry by ID:
+
+    You: Show me the details of that database decision we made
+
+    Assistant: [Calls enyal_recall to find it, then enyal_get with the entry ID]
+    Here are the full details:
+
+    ID: abc123-def456
+    Content: "Use PostgreSQL instead of MongoDB for better query support"
+    Type: decision
+    Scope: project
+    Confidence: 0.95
+    Created: 2026-01-10
+    Updated: 2026-01-10
+    Tags: database, postgresql, architecture
+    Access Count: 12
+
+### Updating Entry Content
+
+Modify an existing entry's content (automatically regenerates embedding):
+
+    You: Update that PostgreSQL decision to mention we're using version 15
+
+    Assistant: [Calls enyal_update with new content]
+    I have updated the entry. It now reads:
+    "Use PostgreSQL 15 instead of MongoDB for better query support and JSONB features"
+
+    The semantic embedding has been regenerated to reflect the new content.
+
+### Adjusting Confidence
+
+Increase or decrease confidence in stored context:
+
+    You: I'm less sure about that caching decision now. Lower its confidence.
+
+    Assistant: [Calls enyal_update with confidence=0.5]
+    I have reduced the confidence of the Redis caching decision from 0.9 to 0.5.
+    It will now rank lower in search results.
+
+### Updating Tags
+
+Refine categorization of entries:
+
+    You: Add the "performance" tag to all our caching-related entries
+
+    Assistant: [Calls enyal_recall to find caching entries, then enyal_update for each]
+    I have added the "performance" tag to 3 entries:
+    1. Redis caching decision
+    2. Cache invalidation pattern
+    3. CDN configuration convention
+
+### Entry Lifecycle Example
+
+Complete workflow from creation to deprecation:
+
+```python
+# 1. Create entry
+entry_id = store.remember(
+    content="Use Redis for session storage",
+    content_type="decision",
+    tags=["redis", "sessions"]
+)
+
+# 2. Retrieve entry
+entry = store.get(entry_id)
+print(f"Confidence: {entry.confidence}")
+
+# 3. Update entry
+store.update(
+    entry_id=entry_id,
+    content="Use Redis 7.0 for session storage with TLS",
+    tags=["redis", "sessions", "security"]
+)
+
+# 4. Deprecate when outdated
+store.forget(entry_id)  # Soft delete - can be restored
+
+# 5. Permanently remove if needed
+store.forget(entry_id, hard_delete=True)
+```
 
 ---
 
@@ -361,10 +613,22 @@ Develop a tagging taxonomy:
     Assistant: [Calls enyal_recall with broad query]
     Here are your stored conventions...
 
-    You: The one about tabs is outdated, we use spaces now. Forget it.
+    You: The one about tabs is outdated, we use spaces now.
+
+    Assistant: Would you like me to update it or remove it?
+
+    You: Update it to say we use 4 spaces
+
+    Assistant: [Calls enyal_update]
+    I have updated the indentation convention to: "Use 4-space indentation"
+
+Or remove outdated entries entirely:
+
+    You: Actually, just forget the old formatting convention
 
     Assistant: [Calls enyal_forget]
-    I have deprecated the outdated indentation convention.
+    I have deprecated the outdated convention. It won't appear in searches
+    but can be restored if needed.
 
 ### Scope Appropriately
 
