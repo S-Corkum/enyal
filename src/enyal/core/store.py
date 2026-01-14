@@ -97,6 +97,19 @@ def deserialize_embedding(data: bytes) -> NDArray[np.float32]:
     return np.array(struct.unpack(f"{count}f", data), dtype=np.float32)
 
 
+def _escape_fts_query(query: str) -> str:
+    """Escape FTS5 special characters for literal matching.
+
+    Wraps query in quotes for phrase matching, escaping any internal quotes.
+    """
+    # Remove characters that break FTS5 query syntax
+    cleaned = query.replace('"', " ").replace("*", " ").replace(":", " ")
+    cleaned = " ".join(cleaned.split())  # Normalize whitespace
+    if not cleaned:
+        return '""'
+    return f'"{cleaned}"'
+
+
 class ContextStore:
     """
     Thread-safe context store with SQLite and sqlite-vec.
@@ -186,7 +199,10 @@ class ContextStore:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         confidence: float = 1.0,
-    ) -> str:
+        check_duplicate: bool = False,
+        duplicate_threshold: float = 0.85,
+        on_duplicate: str = "reject",
+    ) -> str | dict[str, Any]:
         """
         Store new context in memory.
 
@@ -200,9 +216,16 @@ class ContextStore:
             tags: Tags for categorization.
             metadata: Additional metadata.
             confidence: Initial confidence score (0.0-1.0).
+            check_duplicate: Check for similar existing entries before storing.
+            duplicate_threshold: Similarity threshold for duplicate detection (0-1).
+            on_duplicate: Action when duplicate found:
+                - "reject": Return existing entry ID without storing
+                - "merge": Merge into existing entry (combine tags, update confidence)
+                - "store": Store anyway as new entry
 
         Returns:
-            The ID of the created entry.
+            Entry ID (str) if check_duplicate=False.
+            Dict with entry_id, action, duplicate_of, similarity if check_duplicate=True.
         """
         entry = ContextEntry(
             content=content,
@@ -219,6 +242,46 @@ class ContextStore:
             metadata=metadata or {},
             confidence=confidence,
         )
+
+        # Check for duplicates if requested
+        if check_duplicate:
+            similar = self.find_similar(
+                content=content,
+                threshold=duplicate_threshold,
+                limit=1,
+            )
+
+            if similar:
+                existing = similar[0]
+
+                if on_duplicate == "reject":
+                    return {
+                        "entry_id": existing["entry_id"],
+                        "action": "existing",
+                        "duplicate_of": existing["entry_id"],
+                        "similarity": existing["similarity"],
+                    }
+
+                elif on_duplicate == "merge":
+                    # Merge tags (union) and update confidence (max)
+                    existing_entry = existing["entry"]
+                    merged_tags = list(set((existing_entry.tags or []) + (tags or [])))
+                    merged_confidence = max(existing_entry.confidence, confidence)
+
+                    self.update(
+                        entry_id=existing["entry_id"],
+                        confidence=merged_confidence,
+                        tags=merged_tags,
+                    )
+
+                    return {
+                        "entry_id": existing["entry_id"],
+                        "action": "merged",
+                        "duplicate_of": existing["entry_id"],
+                        "similarity": existing["similarity"],
+                    }
+
+                # on_duplicate == "store" falls through to normal insert
 
         # Generate embedding
         embedding = EmbeddingEngine.embed(content)
@@ -259,6 +322,13 @@ class ContextStore:
             )
 
         logger.info(f"Stored context entry: {entry.id}")
+        if check_duplicate:
+            return {
+                "entry_id": entry.id,
+                "action": "created",
+                "duplicate_of": None,
+                "similarity": None,
+            }
         return entry.id
 
     def recall(
@@ -377,6 +447,96 @@ class ContextStore:
             # Sort by score and limit
             results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
+
+    def fts_search(
+        self,
+        query: str,
+        limit: int = 20,
+        include_deprecated: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Search using FTS5 full-text search.
+
+        Args:
+            query: Search query text.
+            limit: Maximum results to return.
+            include_deprecated: Include deprecated entries.
+
+        Returns:
+            List of dicts with entry_id and bm25_score.
+            BM25 scores are negative; more negative = better match.
+        """
+        escaped_query = _escape_fts_query(query)
+
+        with self._read_transaction() as conn:
+            try:
+                sql = """
+                    SELECT ce.id as entry_id, bm25(context_fts) as bm25_score
+                    FROM context_fts
+                    JOIN context_entries ce ON ce.rowid = context_fts.rowid
+                    WHERE context_fts MATCH ?
+                      AND (? = 1 OR ce.is_deprecated = 0)
+                    ORDER BY bm25(context_fts)
+                    LIMIT ?
+                """
+                results = conn.execute(
+                    sql, (escaped_query, int(include_deprecated), limit)
+                ).fetchall()
+                return [{"entry_id": r["entry_id"], "bm25_score": r["bm25_score"]} for r in results]
+            except sqlite3.OperationalError:
+                # FTS query failed (e.g., empty query) - return empty
+                logger.debug(f"FTS search failed for query: {query}")
+                return []
+
+    def find_similar(
+        self,
+        content: str,
+        threshold: float = 0.85,
+        limit: int = 5,
+        exclude_deprecated: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Find entries similar to the given content.
+
+        Args:
+            content: Text to compare against existing entries.
+            threshold: Minimum similarity score (0-1) to return.
+            limit: Maximum results to return.
+            exclude_deprecated: Exclude deprecated entries.
+
+        Returns:
+            List of dicts with entry_id, similarity, and entry.
+        """
+        embedding = EmbeddingEngine.embed(content)
+
+        with self._read_transaction() as conn:
+            results = conn.execute(
+                """
+                SELECT entry_id, distance
+                FROM context_vectors
+                WHERE embedding MATCH ? AND k = ?
+                """,
+                (serialize_embedding(embedding), limit + 5),  # Overfetch for filtering
+            ).fetchall()
+
+            similar = []
+            for row in results:
+                distance = row["distance"]
+                # Convert distance to similarity score (0-1, higher is better)
+                similarity = 1.0 / (1.0 + distance)
+
+                if similarity >= threshold:
+                    entry = self.get(row["entry_id"])
+                    if entry and (not exclude_deprecated or not entry.is_deprecated):
+                        similar.append(
+                            {
+                                "entry_id": row["entry_id"],
+                                "similarity": similarity,
+                                "entry": entry,
+                            }
+                        )
+                        if len(similar) >= limit:
+                            break
+
+            return similar
 
     def forget(self, entry_id: str, hard_delete: bool = False) -> bool:
         """

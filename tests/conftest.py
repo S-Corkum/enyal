@@ -188,3 +188,26 @@ def cli_args_stats() -> dict[str, Any]:
         "db": None,
         "json": False,
     }
+
+
+@pytest.fixture
+def duplicate_entry() -> ContextEntry:
+    """Create an entry similar to sample_entry for dedup testing."""
+    return ContextEntry(
+        id="duplicate-entry-id",
+        content="Test content for unit tests - slightly different",  # Similar to sample
+        content_type=ContextType.FACT,
+        scope_level=ScopeLevel.PROJECT,
+        scope_path="/test/project",
+        tags=["test", "duplicate"],
+        confidence=0.85,
+    )
+
+
+@pytest.fixture
+def mock_fts_results() -> list[dict[str, Any]]:
+    """Mock FTS search results."""
+    return [
+        {"entry_id": "fts-match-1", "bm25_score": -5.5},
+        {"entry_id": "fts-match-2", "bm25_score": -3.2},
+    ]

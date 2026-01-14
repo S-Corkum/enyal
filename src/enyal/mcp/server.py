@@ -66,6 +66,20 @@ class RememberInput(BaseModel):
         default_factory=list,
         description="Tags for categorization",
     )
+    check_duplicate: bool = Field(
+        default=False,
+        description="Check for similar existing entries before storing",
+    )
+    duplicate_threshold: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Similarity threshold for duplicate detection (0-1)",
+    )
+    on_duplicate: str = Field(
+        default="reject",
+        description="Action when duplicate found: reject (return existing), merge, store",
+    )
 
 
 class RecallInput(BaseModel):
@@ -89,6 +103,25 @@ class RecallInput(BaseModel):
     content_type: str | None = Field(
         default=None,
         description="Filter by type: fact, preference, decision, convention, pattern",
+    )
+    min_confidence: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence threshold",
+    )
+
+
+class RecallByScopeInput(BaseModel):
+    """Input for the recall_by_scope tool."""
+
+    query: str = Field(description="Natural language search query")
+    file_path: str = Field(description="Current file path for automatic scope resolution")
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Maximum number of results",
     )
     min_confidence: float = Field(
         default=0.3,
@@ -142,11 +175,17 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
     - Decisions: "We chose React over Vue for the frontend"
     - Conventions: "All API endpoints follow REST naming"
     - Patterns: "Error handling uses Result<T, E> pattern"
+
+    When check_duplicate is True, the system will look for similar existing
+    entries before storing. The on_duplicate parameter controls the behavior:
+    - "reject": Return the existing entry ID without storing a duplicate
+    - "merge": Combine tags and update confidence of the existing entry
+    - "store": Store as a new entry regardless of similarity
     """
     store = get_store()
 
     try:
-        entry_id = store.remember(
+        result = store.remember(
             content=input.content,
             content_type=ContextType(input.content_type),
             scope_level=ScopeLevel(input.scope),
@@ -154,12 +193,39 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
             source_type="conversation",
             source_ref=input.source,
             tags=input.tags,
+            check_duplicate=input.check_duplicate,
+            duplicate_threshold=input.duplicate_threshold,
+            on_duplicate=input.on_duplicate,
         )
-        return {
-            "success": True,
-            "entry_id": entry_id,
-            "message": f"Stored context: {input.content[:50]}...",
-        }
+
+        # Handle both return types (str or dict)
+        if isinstance(result, dict):
+            action = result["action"]
+            entry_id = result["entry_id"]
+
+            if action == "existing":
+                message = f"Found similar existing entry (similarity: {result['similarity']:.2%})"
+            elif action == "merged":
+                message = f"Merged with existing entry (similarity: {result['similarity']:.2%})"
+            else:
+                message = f"Stored context: {input.content[:50]}..."
+
+            return {
+                "success": True,
+                "entry_id": entry_id,
+                "action": action,
+                "duplicate_of": result.get("duplicate_of"),
+                "similarity": result.get("similarity"),
+                "message": message,
+            }
+        else:
+            # Legacy string return (check_duplicate=False)
+            return {
+                "success": True,
+                "entry_id": result,
+                "action": "created",
+                "message": f"Stored context: {input.content[:50]}...",
+            }
     except Exception as e:
         logger.exception("Error storing context")
         return {
@@ -211,6 +277,61 @@ def enyal_recall(input: RecallInput) -> dict[str, Any]:
         }
     except Exception as e:
         logger.exception("Error recalling context")
+        return {
+            "success": False,
+            "error": str(e),
+            "results": [],
+        }
+
+
+@mcp.tool()
+def enyal_recall_by_scope(input: RecallByScopeInput) -> dict[str, Any]:
+    """
+    Search Enyal's memory with automatic scope resolution.
+
+    Searches from most specific (file) to most general (global) scope,
+    returning results weighted by scope specificity. Use this when you
+    want context relevant to the current file or project you're working in.
+
+    The file_path is used to automatically determine applicable scopes:
+    - file: The exact file path
+    - project: Detected via .git, pyproject.toml, package.json, etc.
+    - workspace: User's projects/code directory
+    - global: Always included
+
+    Results from more specific scopes are weighted higher than general ones.
+    """
+    retrieval = get_retrieval()
+
+    try:
+        results = retrieval.search_by_scope(
+            query=input.query,
+            file_path=input.file_path,
+            limit=input.limit,
+            min_confidence=input.min_confidence,
+        )
+
+        return {
+            "success": True,
+            "count": len(results),
+            "results": [
+                {
+                    "id": r.entry.id,
+                    "content": r.entry.content,
+                    "type": r.entry.content_type.value,
+                    "scope": r.entry.scope_level.value,
+                    "scope_path": r.entry.scope_path,
+                    "confidence": r.entry.confidence,
+                    "score": round(r.score, 4),
+                    "tags": r.entry.tags,
+                    "created_at": r.entry.created_at.isoformat(),
+                    "updated_at": r.entry.updated_at.isoformat(),
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        logger.exception("Error recalling context by scope")
         return {
             "success": False,
             "error": str(e),

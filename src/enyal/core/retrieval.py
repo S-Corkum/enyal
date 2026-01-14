@@ -3,6 +3,7 @@
 import math
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from enyal.core.store import ContextStore
 from enyal.models.context import (
@@ -86,16 +87,68 @@ class RetrievalEngine:
             include_deprecated=include_deprecated,
         )
 
-        if not semantic_results:
+        # Get FTS5 keyword results
+        fts_results = self.store.fts_search(
+            query=query,
+            limit=limit * 2,
+            include_deprecated=include_deprecated,
+        )
+
+        # Build lookup maps
+        semantic_map: dict[str, dict[str, Any]] = {r["entry"].id: r for r in semantic_results}
+        fts_scores: dict[str, float] = {
+            r["entry_id"]: self._normalize_bm25(r["bm25_score"]) for r in fts_results
+        }
+
+        # Get union of all entry IDs
+        all_entry_ids = set(semantic_map.keys()) | set(fts_scores.keys())
+
+        if not all_entry_ids:
             return []
 
         # Calculate combined scores
         now = datetime.now(UTC).replace(tzinfo=None)
         results = []
 
-        for result in semantic_results:
-            entry = result["entry"]
-            semantic_score = result["score"]
+        for entry_id in all_entry_ids:
+            sem_result = semantic_map.get(entry_id)
+            fts_score = fts_scores.get(entry_id, 0.0)
+
+            if sem_result:
+                entry = sem_result["entry"]
+                semantic_score = sem_result["score"]
+                distance = sem_result["distance"]
+            else:
+                # Entry only in FTS results - fetch it and apply filters
+                entry = self.store.get(entry_id)
+                if not entry:
+                    continue
+                # Apply filters that semantic search would have applied
+                if not include_deprecated and entry.is_deprecated:
+                    continue
+                if entry.confidence < min_confidence:
+                    continue
+                if scope_level:
+                    sl = ScopeLevel(scope_level) if isinstance(scope_level, str) else scope_level
+                    if entry.scope_level != sl:
+                        continue
+                if content_type:
+                    ct = (
+                        ContextType(content_type) if isinstance(content_type, str) else content_type
+                    )
+                    if entry.content_type != ct:
+                        continue
+                if scope_path:
+                    if not entry.scope_path:
+                        continue
+                    # Prefix match: /project/foo matches entries at /project/foo/bar
+                    if not (
+                        entry.scope_path == scope_path
+                        or entry.scope_path.startswith(scope_path + "/")
+                    ):
+                        continue
+                semantic_score = 0.0
+                distance = float("inf")
 
             # Calculate recency score (exponential decay)
             days_since_update = (now - entry.updated_at).days
@@ -108,24 +161,22 @@ class RetrievalEngine:
                 entry.access_count,
             )
 
-            # Combine scores
-            # Note: keyword_weight is applied to semantic_score as a placeholder
-            # until FTS5 hybrid search is implemented
+            # Combine scores with proper weights
             combined_score = (
                 self.semantic_weight * semantic_score
-                + self.keyword_weight * semantic_score  # TODO: Add FTS5 score
+                + self.keyword_weight * fts_score  # NOW USING ACTUAL FTS SCORE
                 + self.recency_weight * recency_score
             ) * effective_confidence
 
             results.append(
                 ContextSearchResult(
                     entry=entry,
-                    distance=result["distance"],
+                    distance=distance,
                     score=combined_score,
                 )
             )
 
-        # Sort by combined score
+        # Sort by combined score and limit
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:limit]
 
@@ -214,6 +265,22 @@ class RetrievalEngine:
         access_boost = min(0.2, math.log1p(access_count) * 0.05)
 
         return min(1.0, base_confidence * decay_factor + access_boost)
+
+    def _normalize_bm25(self, bm25_score: float) -> float:
+        """Normalize BM25 score to 0-1 range.
+
+        BM25 returns negative scores where more negative = better match.
+        This converts to a 0-1 scale where higher = better match.
+
+        Args:
+            bm25_score: Raw BM25 score (negative float).
+
+        Returns:
+            Normalized score between 0 and 1.
+        """
+        # BM25 scores are negative, with more negative being better
+        # Convert: -10 -> ~0.91, -5 -> ~0.83, -1 -> ~0.5, 0 -> 0
+        return 1.0 / (1.0 + abs(bm25_score)) if bm25_score < 0 else 0.0
 
     def _get_applicable_scopes(self, file_path: Path) -> list[tuple[str, str | None]]:
         """
