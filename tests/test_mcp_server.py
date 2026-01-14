@@ -270,6 +270,16 @@ class TestEnyalRemember:
                 check_duplicate=False,
                 duplicate_threshold=0.85,
                 on_duplicate="reject",
+                # Graph parameters
+                auto_link=False,
+                auto_link_threshold=0.85,
+                relates_to=None,
+                supersedes=None,
+                depends_on=None,
+                # Conflict/supersedes detection
+                detect_conflicts=False,
+                suggest_supersedes=False,
+                auto_supersede=False,
             )
 
     def test_enyal_remember_error(self, server_module) -> None:
@@ -336,6 +346,10 @@ class TestEnyalRecall:
                 scope_path=None,
                 content_type=ContextType.FACT,
                 min_confidence=0.5,
+                # Validity parameters
+                exclude_superseded=True,
+                flag_conflicts=True,
+                freshness_boost=0.1,
             )
 
     def test_enyal_recall_empty_results(self, server_module) -> None:

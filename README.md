@@ -8,6 +8,11 @@ Enyal gives AI agents like Claude Code durable context that survives session res
 
 - **Persistent Memory**: Context survives restarts, crashes, and process termination
 - **Semantic Search**: Find relevant context using natural language queries (384-dim embeddings via all-MiniLM-L6-v2)
+- **Knowledge Graph**: Link related entries with relationships (supersedes, depends_on, conflicts_with, relates_to)
+- **Validity Tracking**: Automatically filter superseded entries and flag conflicts
+- **Entry Versioning**: Full history of changes with automatic version creation
+- **Usage Analytics**: Track how context is accessed and used over time
+- **Health Monitoring**: Get insights into stale, orphan, and conflicting entries
 - **Hierarchical Scoping**: Global → workspace → project → file context inheritance
 - **Fully Offline**: Zero network calls during operation
 - **Cross-Platform**: macOS (Intel + Apple Silicon), Linux, and Windows
@@ -267,15 +272,36 @@ See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for detailed platform-specific 
 
 ## Available Tools
 
+### Core Tools
+
 | Tool | Description |
 |------|-------------|
-| **enyal_remember** | Store new context with optional duplicate detection and merging |
-| **enyal_recall** | Semantic search for relevant context with filtering by scope and type |
+| **enyal_remember** | Store new context with optional duplicate detection, conflict detection, and auto-linking |
+| **enyal_recall** | Semantic search with validity filtering (excludes superseded entries by default) |
 | **enyal_recall_by_scope** | Scope-aware search that automatically finds context relevant to the current file/project |
 | **enyal_forget** | Remove or deprecate context (soft-delete by default, hard-delete optional) |
-| **enyal_update** | Update existing entries (content, confidence, tags) |
+| **enyal_update** | Update existing entries (content, confidence, tags) - automatically creates version |
 | **enyal_get** | Retrieve a specific entry by ID with full metadata |
 | **enyal_stats** | Get usage statistics and health metrics |
+
+### Knowledge Graph Tools
+
+| Tool | Description |
+|------|-------------|
+| **enyal_link** | Create relationships between entries (relates_to, supersedes, depends_on, conflicts_with) |
+| **enyal_unlink** | Remove a relationship between entries |
+| **enyal_edges** | Get all relationships for an entry |
+| **enyal_traverse** | Walk the knowledge graph from an entry |
+| **enyal_impact** | Find all entries that depend on a given entry |
+
+### Intelligence Tools
+
+| Tool | Description |
+|------|-------------|
+| **enyal_health** | Get graph health metrics (stale, orphan, conflicting entries) |
+| **enyal_review** | Get entries needing review (stale, orphan, or conflicted) |
+| **enyal_history** | Get version history for an entry |
+| **enyal_analytics** | Get usage analytics (recall frequency, top accessed entries) |
 
 ### Content Types
 
@@ -295,6 +321,15 @@ See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for detailed platform-specific 
 | `workspace` | Directory of projects | `/Users/dev/projects` |
 | `project` | Single project | `/Users/dev/myproject` |
 | `file` | Specific file | `/Users/dev/myproject/src/auth.py` |
+
+### Relationship Types
+
+| Type | Use For | Example |
+|------|---------|---------|
+| `relates_to` | General semantic relationship | "Testing guide" relates to "pytest conventions" |
+| `supersedes` | Entry A replaces entry B | New decision supersedes old decision |
+| `depends_on` | Entry A requires entry B | Feature depends on architecture decision |
+| `conflicts_with` | Entries contradict each other | "Use tabs" conflicts with "Use spaces" |
 
 ## CLI Usage
 
@@ -379,7 +414,7 @@ similar = store.find_similar(
     limit=3
 )
 
-# Update context
+# Update context (automatically creates a version record)
 store.update(entry_id, confidence=0.9, tags=["testing", "pytest", "unit-tests"])
 
 # Get specific entry
@@ -388,6 +423,78 @@ entry = store.get(entry_id)
 # Get statistics
 stats = store.stats()
 print(f"Total entries: {stats.total_entries}")
+```
+
+### Knowledge Graph
+
+```python
+from enyal.models.context import EdgeType
+
+# Create entries
+old_decision = store.remember(content="Use Python 3.10", content_type="decision")
+new_decision = store.remember(content="Use Python 3.13", content_type="decision")
+
+# Link entries (new supersedes old)
+store.link(new_decision, old_decision, EdgeType.SUPERSEDES)
+
+# Search with validity filtering (superseded entries excluded by default)
+results = retrieval.search("Python version", exclude_superseded=True)
+
+# Include superseded entries with metadata
+results = retrieval.search("Python version", exclude_superseded=False)
+for r in results:
+    if r.is_superseded:
+        print(f"SUPERSEDED: {r.entry.content} (by {r.superseded_by})")
+
+# Traverse the graph
+related = store.traverse(new_decision, max_depth=2)
+
+# Find what depends on an entry
+dependents = store.traverse(new_decision, direction="incoming",
+                           edge_types=[EdgeType.DEPENDS_ON])
+```
+
+### Versioning & History
+
+```python
+# Every remember() creates an initial version
+entry_id = store.remember(content="Initial approach", content_type="decision")
+
+# Every update() creates a new version
+store.update(entry_id, content="Revised approach")
+store.update(entry_id, content="Final approach")
+
+# Get version history
+history = store.get_history(entry_id)
+for version in history:
+    print(f"v{version['version']}: {version['change_type']} - {version['content']}")
+# Output:
+# v3: updated - Final approach
+# v2: updated - Revised approach
+# v1: created - Initial approach
+```
+
+### Analytics & Health
+
+```python
+# Track usage (called automatically during recall)
+store.track_usage(entry_id, "recall", query="approach", result_rank=1)
+
+# Get analytics
+analytics = store.get_analytics(days=30)
+print(f"Top recalled: {analytics['top_recalled']}")
+
+# Health check
+health = store.health_check()
+print(f"Health score: {health['health_score']:.0%}")
+print(f"Stale entries: {health['stale_entries']}")
+print(f"Orphan entries: {health['orphan_entries']}")
+print(f"Conflicts: {health['unresolved_conflicts']}")
+
+# Get entries needing review
+stale = store.get_stale_entries(days_old=180)
+orphans = store.get_orphan_entries()
+conflicts = store.get_conflicted_entries()
 ```
 
 ## Configuration
@@ -529,6 +636,9 @@ Enyal uses a unified SQLite database with:
 - **Relational storage** for metadata and attributes
 - **sqlite-vec** for vector similarity search (384-dim embeddings)
 - **FTS5** for keyword search
+- **Knowledge graph** with typed edges (supersedes, depends_on, conflicts_with, relates_to)
+- **Version history** for change tracking
+- **Usage analytics** for access patterns
 - **WAL mode** for concurrent access
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design decisions.

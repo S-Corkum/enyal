@@ -1,6 +1,6 @@
 # Enyal Architecture Document
 
-> **Version:** 1.1.0
+> **Version:** 1.2.0
 > **Last Updated:** January 2026
 > **Status:** Implemented
 
@@ -1200,6 +1200,294 @@ The architecture supports future additions:
 
 ---
 
+## 10. Knowledge Graph Layer
+
+### Design Decision: SQLite Edge Table
+
+**Selected:** `context_edges` table with `ON DELETE CASCADE`
+
+**Rationale:**
+- Zero new dependencies (stays in SQLite)
+- Unified storage with entries and vectors
+- Automatic cleanup when entries are deleted
+- Supports recursive queries via SQL CTEs with window functions
+
+### Edge Types
+
+| Type | Purpose | Direction |
+|------|---------|-----------|
+| `relates_to` | Semantic relationship (auto-generated) | Bidirectional conceptually |
+| `supersedes` | Entry A replaces entry B | A → B |
+| `depends_on` | Entry A requires entry B | A → B |
+| `conflicts_with` | Entries contradict each other | Bidirectional |
+
+### Schema
+
+```sql
+CREATE TABLE context_edges (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES context_entries(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL REFERENCES context_entries(id) ON DELETE CASCADE,
+    edge_type TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    created_at TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}',
+    UNIQUE(source_id, target_id, edge_type)
+);
+```
+
+### Auto-Linking
+
+When `auto_link=True` is passed to `remember()`:
+1. After storing the entry and committing the transaction
+2. Find similar entries via `find_similar()`
+3. For each entry with similarity >= threshold, create `RELATES_TO` edge
+4. Edge confidence is set to the similarity score
+5. Metadata includes `{"auto_generated": true}`
+
+This builds the graph automatically without user friction.
+
+### Graph Traversal
+
+Uses SQL recursive CTEs with window functions for deterministic results:
+
+```sql
+WITH RECURSIVE traverse_chain AS (
+    SELECT target_id as entry_id, 1 as depth, target_id as path, edge_type, confidence
+    FROM context_edges WHERE source_id = ?
+    UNION ALL
+    SELECT e.target_id, tc.depth + 1, tc.path || ',' || e.target_id, e.edge_type, e.confidence
+    FROM context_edges e
+    JOIN traverse_chain tc ON e.source_id = tc.entry_id
+    WHERE tc.depth < ? AND tc.path NOT LIKE '%' || e.target_id || '%'
+),
+ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY entry_id ORDER BY depth) as rn
+    FROM traverse_chain
+)
+SELECT entry_id, depth, path, edge_type, confidence
+FROM ranked WHERE rn = 1
+ORDER BY depth, entry_id;
+```
+
+The window function ensures we always return the edge information from the shortest path.
+
+### Impact Analysis
+
+`enyal_impact` traverses INCOMING `depends_on` edges to find all entries that would be affected by changing the target entry.
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `enyal_link` | Create explicit relationship |
+| `enyal_unlink` | Remove a relationship |
+| `enyal_edges` | Get edges for an entry |
+| `enyal_traverse` | Walk the graph |
+| `enyal_impact` | Find affected entries |
+
+### Statistics
+
+`enyal_stats` now includes:
+- `total_edges`: Count of all edges
+- `edges_by_type`: Breakdown by relationship type
+- `connected_entries`: Entries with at least one edge
+
+### Threading Considerations
+
+The `ContextStore` uses `threading.RLock()` (reentrant lock) to allow nested write operations. This is necessary because `remember()` may call `link()` internally when creating explicit edges.
+
+---
+
+## 11. Intelligent Graph Features
+
+The knowledge graph includes intelligent features for validity tracking, health monitoring, versioning, and analytics.
+
+### Validity Filtering
+
+Search results include validity metadata to help surface the most relevant and current information:
+
+```python
+class ContextSearchResult(BaseModel):
+    entry: ContextEntry
+    distance: float
+    score: float
+    # Validity metadata
+    is_superseded: bool = False      # Entry has been superseded
+    superseded_by: str | None = None # ID of superseding entry
+    has_conflicts: bool = False      # Entry has unresolved conflicts
+    freshness_score: float = 1.0     # Time-based freshness (0-1)
+    adjusted_score: float | None     # Score after validity adjustments
+```
+
+**Search Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `exclude_superseded` | `True` | Filter out superseded entries |
+| `flag_conflicts` | `True` | Mark entries with conflicts |
+| `freshness_boost` | `0.1` | Recency weighting factor |
+
+**Per-Type Decay Rates:**
+
+Different content types decay at different rates based on their expected stability:
+
+```python
+DEFAULT_DECAY_RATES = {
+    ContextType.FACT: 1.0,        # Facts decay at normal rate
+    ContextType.PREFERENCE: 0.5,  # Preferences are more stable
+    ContextType.DECISION: 0.3,    # Decisions are even more stable
+    ContextType.CONVENTION: 0.2,  # Conventions rarely change
+    ContextType.PATTERN: 0.4,     # Patterns are moderately stable
+}
+```
+
+### Conflict Detection
+
+When storing new context with `detect_conflicts=True`, the system:
+
+1. Searches for semantically similar entries
+2. Checks for contradictory content (negation patterns, different choices)
+3. Returns detected conflicts and supersedes suggestions
+
+```python
+result = store.remember(
+    content="Use Python 3.12 for this project",
+    detect_conflicts=True,
+    suggest_supersedes=True,
+)
+# Returns: {
+#   "entry_id": "...",
+#   "detected_conflicts": [...],
+#   "supersedes_candidates": [...]
+# }
+```
+
+### Health Monitoring
+
+The `health_check()` method provides comprehensive graph health metrics:
+
+```python
+{
+    "total_entries": 150,
+    "active_entries": 142,
+    "superseded_count": 5,
+    "conflicts_count": 3,
+    "stale_count": 10,      # Entries older than 180 days
+    "orphan_count": 2,      # Entries with no edges
+    "health_score": 0.87,   # Overall health (0-1)
+    "issues": {
+        "superseded_entries": [...],
+        "conflicted_entries": [...],
+        "stale_entries": [...],
+        "orphan_entries": [...]
+    }
+}
+```
+
+**Health Score Calculation:**
+
+```python
+def _calculate_health_score(total, superseded, conflicts, stale, orphans):
+    if total == 0:
+        return 1.0
+    penalty = (superseded * 0.05 + conflicts * 0.1 +
+               stale * 0.02 + orphans * 0.01)
+    return max(0.0, 1.0 - penalty / total)
+```
+
+### Review Tools
+
+Helper methods for maintenance workflows:
+
+| Method | Description |
+|--------|-------------|
+| `get_stale_entries(days_old=180)` | Find entries not updated recently |
+| `get_orphan_entries()` | Find entries with no graph connections |
+| `get_conflicted_entries()` | Find entries with CONFLICTS_WITH edges |
+
+### Entry Versioning
+
+Every content update creates a version record for audit trails:
+
+**Schema:**
+
+```sql
+CREATE TABLE context_versions (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    changed_at TEXT NOT NULL,
+    change_type TEXT NOT NULL CHECK (change_type IN ('created', 'updated', 'restored')),
+    metadata TEXT DEFAULT '{}',
+    FOREIGN KEY (entry_id) REFERENCES context_entries(id) ON DELETE CASCADE
+);
+```
+
+**Usage:**
+
+```python
+history = store.get_history(entry_id, limit=10)
+# Returns list of version records with content, timestamps, and change types
+```
+
+### Usage Analytics
+
+Track how context entries are accessed and used:
+
+**Schema:**
+
+```sql
+CREATE TABLE context_analytics (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('recall', 'update', 'link', 'impact')),
+    event_at TEXT NOT NULL,
+    query TEXT,           -- For recall events
+    result_rank INTEGER,  -- Position in search results
+    metadata TEXT DEFAULT '{}',
+    FOREIGN KEY (entry_id) REFERENCES context_entries(id) ON DELETE CASCADE
+);
+```
+
+**Analytics Methods:**
+
+```python
+# Track usage
+store.track_usage(entry_id, event_type="recall", query="testing", result_rank=1)
+
+# Get analytics
+analytics = store.get_analytics(
+    entry_id=None,      # Optional: filter by entry
+    event_type=None,    # Optional: filter by event type
+    days=30,            # Time window
+    limit=100           # Max events
+)
+# Returns: {
+#   "events": [...],
+#   "summary": {
+#       "total_events": 45,
+#       "by_type": {"recall": 30, "update": 10, "link": 5},
+#       "by_entry": {...}
+#   }
+# }
+```
+
+### MCP Tools for Intelligence
+
+| Tool | Description |
+|------|-------------|
+| `enyal_health` | Get graph health metrics and issues |
+| `enyal_review` | Get entries needing review (stale/orphan/conflicted) |
+| `enyal_history` | Get version history for an entry |
+| `enyal_analytics` | Get usage analytics |
+
+---
+
 ## Appendix A: Technology Versions
 
 | Component | Version | Notes |
@@ -1224,4 +1512,4 @@ The architecture supports future additions:
 
 ---
 
-*Document reflects the implemented architecture as of January 2026. Hybrid search, content deduplication, and scope-aware retrieval are fully functional.*
+*Document reflects the implemented architecture as of January 2026. Hybrid search, content deduplication, scope-aware retrieval, intelligent graph features (validity filtering, health monitoring, versioning, and analytics) are fully functional.*

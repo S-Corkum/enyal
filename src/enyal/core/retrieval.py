@@ -12,6 +12,16 @@ from enyal.models.context import (
     ScopeLevel,
 )
 
+# Default decay rates by content type (multiplier for freshness_boost)
+# Higher values mean faster decay (more sensitive to time)
+DEFAULT_DECAY_RATES: dict[ContextType, float] = {
+    ContextType.FACT: 1.0,  # Facts decay at normal rate
+    ContextType.PREFERENCE: 0.5,  # Preferences are more stable
+    ContextType.DECISION: 0.3,  # Decisions are even more stable
+    ContextType.CONVENTION: 0.2,  # Conventions rarely change
+    ContextType.PATTERN: 0.4,  # Patterns are moderately stable
+}
+
 
 class RetrievalEngine:
     """
@@ -60,6 +70,10 @@ class RetrievalEngine:
         content_type: ContextType | str | None = None,
         min_confidence: float = 0.3,
         include_deprecated: bool = False,
+        # Validity parameters
+        exclude_superseded: bool = True,
+        flag_conflicts: bool = True,
+        freshness_boost: float = 0.1,
     ) -> list[ContextSearchResult]:
         """
         Perform hybrid search combining semantic and keyword matching.
@@ -72,9 +86,12 @@ class RetrievalEngine:
             content_type: Filter by content type.
             min_confidence: Minimum confidence threshold.
             include_deprecated: Include deprecated entries.
+            exclude_superseded: Exclude entries that have been superseded (default True).
+            flag_conflicts: Mark entries with unresolved conflicts (default True).
+            freshness_boost: How much to boost recent entries (0-1, default 0.1).
 
         Returns:
-            List of search results with combined scores.
+            List of search results with combined scores and validity metadata.
         """
         # Get semantic results
         semantic_results = self.store.recall(
@@ -169,16 +186,63 @@ class RetrievalEngine:
             ) * effective_confidence
 
             results.append(
+                {
+                    "entry": entry,
+                    "distance": distance,
+                    "score": combined_score,
+                }
+            )
+
+        # Get validity information from graph
+        superseded_ids = (
+            self.store.get_superseded_ids() if (exclude_superseded or flag_conflicts) else set()
+        )
+        conflicted_ids = self.store.get_conflicted_ids() if flag_conflicts else set()
+
+        # Filter and annotate results with validity metadata
+        valid_results = []
+        for result in results:
+            entry = result["entry"]
+            entry_id = entry.id
+            is_superseded = entry_id in superseded_ids
+            has_conflicts = entry_id in conflicted_ids
+
+            # Skip superseded entries if requested
+            if exclude_superseded and is_superseded:
+                continue
+
+            # Calculate freshness score with per-type decay rate
+            days_old = (now - entry.updated_at).days
+            type_decay_rate = DEFAULT_DECAY_RATES.get(entry.content_type, 1.0)
+            effective_boost = freshness_boost * type_decay_rate
+            freshness_score = 1.0 / (1.0 + effective_boost * days_old)
+
+            # Calculate adjusted score
+            adjusted = result["score"] * freshness_score
+            if has_conflicts:
+                adjusted *= 0.9  # Slight penalty for conflicted entries
+
+            # Get superseding entry if applicable
+            superseded_by = None
+            if is_superseded:
+                superseded_by = self.store.get_superseding_entry(entry_id)
+
+            valid_results.append(
                 ContextSearchResult(
                     entry=entry,
-                    distance=distance,
-                    score=combined_score,
+                    distance=result["distance"],
+                    score=result["score"],
+                    is_superseded=is_superseded,
+                    superseded_by=superseded_by,
+                    has_conflicts=has_conflicts,
+                    freshness_score=freshness_score,
+                    adjusted_score=adjusted,
                 )
             )
 
-        # Sort by combined score and limit
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results[:limit]
+        # Sort by adjusted score
+        valid_results.sort(key=lambda x: x.adjusted_score or x.score, reverse=True)
+        return valid_results[:limit]
 
     def search_by_scope(
         self,
@@ -186,6 +250,10 @@ class RetrievalEngine:
         file_path: str | Path,
         limit: int = 10,
         min_confidence: float = 0.3,
+        # Validity parameters (pass through to search)
+        exclude_superseded: bool = True,
+        flag_conflicts: bool = True,
+        freshness_boost: float = 0.1,
     ) -> list[ContextSearchResult]:
         """
         Search with automatic scope resolution based on file path.
@@ -198,6 +266,9 @@ class RetrievalEngine:
             file_path: Current file path for scope resolution.
             limit: Maximum number of results.
             min_confidence: Minimum confidence threshold.
+            exclude_superseded: Exclude entries that have been superseded (default True).
+            flag_conflicts: Mark entries with unresolved conflicts (default True).
+            freshness_boost: How much to boost recent entries (0-1, default 0.1).
 
         Returns:
             List of search results from all applicable scopes.
@@ -213,17 +284,27 @@ class RetrievalEngine:
                 scope_level=scope_level,
                 scope_path=scope_path,
                 min_confidence=min_confidence,
+                exclude_superseded=exclude_superseded,
+                flag_conflicts=flag_conflicts,
+                freshness_boost=freshness_boost,
             )
 
             # Apply scope weight
             weight = scope_weights.get(scope_level, 0.5)
             for result in results:
-                # Create new result with adjusted score
+                # Create new result with adjusted score, preserving validity metadata
+                weighted_score = result.score * weight
+                weighted_adjusted = (result.adjusted_score or result.score) * weight
                 all_results.append(
                     ContextSearchResult(
                         entry=result.entry,
                         distance=result.distance,
-                        score=result.score * weight,
+                        score=weighted_score,
+                        is_superseded=result.is_superseded,
+                        superseded_by=result.superseded_by,
+                        has_conflicts=result.has_conflicts,
+                        freshness_score=result.freshness_score,
+                        adjusted_score=weighted_adjusted,
                     )
                 )
 

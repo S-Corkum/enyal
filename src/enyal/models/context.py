@@ -41,6 +41,15 @@ class SourceType(StrEnum):
     MANUAL = "manual"
 
 
+class EdgeType(StrEnum):
+    """Types of relationships between context entries."""
+
+    RELATES_TO = "relates_to"
+    SUPERSEDES = "supersedes"
+    DEPENDS_ON = "depends_on"
+    CONFLICTS_WITH = "conflicts_with"
+
+
 class ContextEntry(BaseModel):
     """A single context entry in Enyal's memory."""
 
@@ -63,12 +72,34 @@ class ContextEntry(BaseModel):
     model_config = {"frozen": False, "extra": "forbid"}
 
 
+class ContextEdge(BaseModel):
+    """A relationship between two context entries."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    source_id: str = Field(description="ID of the source entry")
+    target_id: str = Field(description="ID of the target entry")
+    edge_type: EdgeType = Field(description="Type of relationship")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    created_at: datetime = Field(default_factory=_utc_now)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"frozen": False, "extra": "forbid"}
+
+
 class ContextSearchResult(BaseModel):
-    """A search result with relevance information."""
+    """A search result with relevance information and validity metadata."""
 
     entry: ContextEntry
     distance: float = Field(description="Vector distance (lower is more similar)")
     score: float = Field(description="Combined relevance score (higher is better)")
+    # Validity metadata
+    is_superseded: bool = Field(default=False, description="Entry has been superseded by another")
+    superseded_by: str | None = Field(default=None, description="ID of superseding entry")
+    has_conflicts: bool = Field(default=False, description="Entry has unresolved conflicts")
+    freshness_score: float = Field(default=1.0, description="Time-based freshness (0-1)")
+    adjusted_score: float | None = Field(
+        default=None, description="Score after validity adjustments"
+    )
 
     model_config = {"frozen": True}
 
@@ -85,5 +116,9 @@ class ContextStats(BaseModel):
     storage_size_bytes: int
     oldest_entry: datetime | None
     newest_entry: datetime | None
+    # Graph statistics
+    total_edges: int = 0
+    edges_by_type: dict[str, int] = Field(default_factory=dict)
+    connected_entries: int = 0
 
     model_config = {"frozen": True}

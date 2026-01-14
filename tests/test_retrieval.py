@@ -587,3 +587,132 @@ class TestGetRelated:
         results = engine.get_related(sample_entry.id, limit=3)
 
         assert len(results) <= 3
+
+
+class TestValidityFiltering:
+    """Tests for validity filtering in search."""
+
+    def test_search_default_excludes_superseded(self, sample_entry: ContextEntry) -> None:
+        """Test that superseded entries are excluded by default."""
+        superseded_entry = ContextEntry(
+            id="superseded-id",
+            content="Old deprecated info",
+            content_type=ContextType.FACT,
+            scope_level=ScopeLevel.PROJECT,
+        )
+
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": sample_entry, "distance": 0.2, "score": 0.8},
+            {"entry": superseded_entry, "distance": 0.3, "score": 0.7},
+        ]
+        mock_store.fts_search.return_value = []
+        mock_store.get_superseded_ids.return_value = {"superseded-id"}
+        mock_store.get_conflicted_ids.return_value = set()
+        mock_store.get_superseding_entry.return_value = None
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query")
+
+        # Superseded entry should be filtered out
+        result_ids = [r.entry.id for r in results]
+        assert "superseded-id" not in result_ids
+        assert sample_entry.id in result_ids
+
+    def test_search_include_superseded(self, sample_entry: ContextEntry) -> None:
+        """Test that superseded entries can be included with flag."""
+        superseded_entry = ContextEntry(
+            id="superseded-id",
+            content="Old deprecated info",
+            content_type=ContextType.FACT,
+            scope_level=ScopeLevel.PROJECT,
+        )
+
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": sample_entry, "distance": 0.2, "score": 0.8},
+            {"entry": superseded_entry, "distance": 0.3, "score": 0.7},
+        ]
+        mock_store.fts_search.return_value = []
+        mock_store.get_superseded_ids.return_value = {"superseded-id"}
+        mock_store.get_conflicted_ids.return_value = set()
+        mock_store.get_superseding_entry.return_value = "sample-entry-id"
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query", exclude_superseded=False)
+
+        # Superseded entry should be included
+        result_ids = [r.entry.id for r in results]
+        assert "superseded-id" in result_ids
+        # But it should be marked as superseded
+        superseded_result = next(r for r in results if r.entry.id == "superseded-id")
+        assert superseded_result.is_superseded is True
+
+    def test_search_flags_conflicts(self, sample_entry: ContextEntry) -> None:
+        """Test that conflicted entries are flagged."""
+        conflicted_entry = ContextEntry(
+            id="conflicted-id",
+            content="Conflicting info",
+            content_type=ContextType.FACT,
+            scope_level=ScopeLevel.PROJECT,
+        )
+
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": sample_entry, "distance": 0.2, "score": 0.8},
+            {"entry": conflicted_entry, "distance": 0.3, "score": 0.7},
+        ]
+        mock_store.fts_search.return_value = []
+        mock_store.get_superseded_ids.return_value = set()
+        mock_store.get_conflicted_ids.return_value = {"conflicted-id"}
+        mock_store.get_superseding_entry.return_value = None
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query")
+
+        # Find the conflicted entry in results
+        conflicted_result = next(r for r in results if r.entry.id == "conflicted-id")
+        assert conflicted_result.has_conflicts is True
+        # Non-conflicted entry should not be flagged
+        normal_result = next(r for r in results if r.entry.id == sample_entry.id)
+        assert normal_result.has_conflicts is False
+
+    def test_search_freshness_score_calculated(self, sample_entry: ContextEntry) -> None:
+        """Test that freshness score is calculated."""
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": sample_entry, "distance": 0.2, "score": 0.8},
+        ]
+        mock_store.fts_search.return_value = []
+        mock_store.get_superseded_ids.return_value = set()
+        mock_store.get_conflicted_ids.return_value = set()
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query")
+
+        assert len(results) == 1
+        # Freshness score should be between 0 and 1
+        assert 0.0 <= results[0].freshness_score <= 1.0
+        # Adjusted score should also be set
+        assert results[0].adjusted_score is not None
+
+    def test_search_validity_metadata_in_results(self, sample_entry: ContextEntry) -> None:
+        """Test that all validity metadata is present in results."""
+        mock_store = MagicMock()
+        mock_store.recall.return_value = [
+            {"entry": sample_entry, "distance": 0.2, "score": 0.8},
+        ]
+        mock_store.fts_search.return_value = []
+        mock_store.get_superseded_ids.return_value = set()
+        mock_store.get_conflicted_ids.return_value = set()
+
+        engine = RetrievalEngine(mock_store)
+        results = engine.search("test query")
+
+        result = results[0]
+        # All validity fields should be present
+        assert hasattr(result, "is_superseded")
+        assert hasattr(result, "superseded_by")
+        assert hasattr(result, "has_conflicts")
+        assert hasattr(result, "freshness_score")
+        assert hasattr(result, "adjusted_score")
