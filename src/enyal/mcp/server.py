@@ -956,13 +956,9 @@ def _get_health_recommendations(health: dict[str, Any]) -> list[str]:
             f"Consider cleaning up {health['superseded_entries']} superseded entries"
         )
     if health["unresolved_conflicts"] > 0:
-        recommendations.append(
-            f"Resolve {health['unresolved_conflicts']} conflicting entries"
-        )
+        recommendations.append(f"Resolve {health['unresolved_conflicts']} conflicting entries")
     if health["stale_entries"] > 20:
-        recommendations.append(
-            f"Review {health['stale_entries']} stale entries (>6 months old)"
-        )
+        recommendations.append(f"Review {health['stale_entries']} stale entries (>6 months old)")
     if health["orphan_entries"] > health["total_entries"] * 0.3:
         recommendations.append(
             "Many entries have no connections - consider linking related entries"

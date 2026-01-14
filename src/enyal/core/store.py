@@ -443,19 +443,25 @@ class ContextStore:
             for match in similar:
                 existing = match["entry"]
                 # Heuristic: Same scope + type + high similarity + contradiction = conflict
-                if (existing.scope_level == entry.scope_level and
-                    existing.content_type == entry.content_type and
-                    existing.id != entry.id and
-                    self._appears_contradictory(content, existing.content)):
+                if (
+                    existing.scope_level == entry.scope_level
+                    and existing.content_type == entry.content_type
+                    and existing.id != entry.id
+                    and self._appears_contradictory(content, existing.content)
+                ):
                     self.link(
-                        entry.id, existing.id, EdgeType.CONFLICTS_WITH,
-                        metadata={"detected_at": "store", "similarity": match["similarity"]}
+                        entry.id,
+                        existing.id,
+                        EdgeType.CONFLICTS_WITH,
+                        metadata={"detected_at": "store", "similarity": match["similarity"]},
                     )
-                    potential_conflicts.append({
-                        "entry_id": existing.id,
-                        "content": existing.content[:100],
-                        "similarity": match["similarity"],
-                    })
+                    potential_conflicts.append(
+                        {
+                            "entry_id": existing.id,
+                            "content": existing.content[:100],
+                            "similarity": match["similarity"],
+                        }
+                    )
 
         # Suggest or auto-create supersedes relationships
         supersedes_candidates: list[dict[str, Any]] = []
@@ -468,18 +474,26 @@ class ContextStore:
             )
             for match in similar:
                 existing = match["entry"]
-                if (existing.id != entry.id and
-                    existing.scope_level == entry.scope_level and
-                    existing.content_type == entry.content_type):
+                if (
+                    existing.id != entry.id
+                    and existing.scope_level == entry.scope_level
+                    and existing.content_type == entry.content_type
+                ):
                     if auto_supersede:
-                        self.link(entry.id, existing.id, EdgeType.SUPERSEDES,
-                                 metadata={"auto_detected": True, "similarity": match["similarity"]})
-                    supersedes_candidates.append({
-                        "entry_id": existing.id,
-                        "content": existing.content[:100],
-                        "similarity": match["similarity"],
-                        "auto_superseded": auto_supersede,
-                    })
+                        self.link(
+                            entry.id,
+                            existing.id,
+                            EdgeType.SUPERSEDES,
+                            metadata={"auto_detected": True, "similarity": match["similarity"]},
+                        )
+                    supersedes_candidates.append(
+                        {
+                            "entry_id": existing.id,
+                            "content": existing.content[:100],
+                            "similarity": match["similarity"],
+                            "auto_superseded": auto_supersede,
+                        }
+                    )
 
         logger.info(f"Stored context entry: {entry.id}")
 
@@ -1029,9 +1043,7 @@ class ContextStore:
             The edge if found, None otherwise.
         """
         with self._read_transaction() as conn:
-            row = conn.execute(
-                "SELECT * FROM context_edges WHERE id = ?", (edge_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM context_edges WHERE id = ?", (edge_id,)).fetchone()
             if row:
                 return self._row_to_edge(dict(row))
             return None
@@ -1163,7 +1175,7 @@ class ContextStore:
                     JOIN traverse_chain tc ON e.{start_col} = tc.entry_id
                     WHERE tc.depth < ?
                         AND tc.path NOT LIKE '%' || e.{next_col} || '%'
-                        {type_filter.replace('edge_type', 'e.edge_type') if type_filter else ''}
+                        {type_filter.replace("edge_type", "e.edge_type") if type_filter else ""}
                 ),
                 ranked AS (
                     -- Use window function to pick the shortest path for each entry
@@ -1218,7 +1230,7 @@ class ContextStore:
         with self._read_transaction() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT target_id FROM context_edges WHERE edge_type = ?",
-                (EdgeType.SUPERSEDES.value,)
+                (EdgeType.SUPERSEDES.value,),
             ).fetchall()
             return {row["target_id"] for row in rows}
 
@@ -1238,7 +1250,7 @@ class ContextStore:
                     SELECT target_id as entry_id FROM context_edges WHERE edge_type = ?
                 )
                 """,
-                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value)
+                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value),
             ).fetchall()
             return {row["entry_id"] for row in rows}
 
@@ -1247,7 +1259,7 @@ class ContextStore:
         with self._read_transaction() as conn:
             row = conn.execute(
                 "SELECT 1 FROM context_edges WHERE target_id = ? AND edge_type = ? LIMIT 1",
-                (entry_id, EdgeType.SUPERSEDES.value)
+                (entry_id, EdgeType.SUPERSEDES.value),
             ).fetchone()
             return row is not None
 
@@ -1256,7 +1268,7 @@ class ContextStore:
         with self._read_transaction() as conn:
             row = conn.execute(
                 "SELECT source_id FROM context_edges WHERE target_id = ? AND edge_type = ? LIMIT 1",
-                (entry_id, EdgeType.SUPERSEDES.value)
+                (entry_id, EdgeType.SUPERSEDES.value),
             ).fetchone()
             return row["source_id"] if row else None
 
@@ -1284,7 +1296,7 @@ class ContextStore:
                 SELECT COUNT(DISTINCT target_id) FROM context_edges
                 WHERE edge_type = ?
                 """,
-                (EdgeType.SUPERSEDES.value,)
+                (EdgeType.SUPERSEDES.value,),
             ).fetchone()[0]
 
             # Conflicted entries (entries involved in CONFLICTS_WITH edges)
@@ -1296,7 +1308,7 @@ class ContextStore:
                     SELECT target_id as entry_id FROM context_edges WHERE edge_type = ?
                 )
                 """,
-                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value)
+                (EdgeType.CONFLICTS_WITH.value, EdgeType.CONFLICTS_WITH.value),
             ).fetchone()[0]
 
             # Stale entries (not updated in 6 months)
@@ -1305,7 +1317,7 @@ class ContextStore:
                 SELECT COUNT(*) FROM context_entries
                 WHERE is_deprecated = 0 AND datetime(updated_at) < ?
                 """,
-                (stale_threshold.isoformat(),)
+                (stale_threshold.isoformat(),),
             ).fetchone()[0]
 
             # Orphan entries (no edges at all)
@@ -1326,7 +1338,7 @@ class ContextStore:
                 SELECT COUNT(*) FROM context_entries
                 WHERE is_deprecated = 0 AND confidence < ?
                 """,
-                (low_confidence_threshold,)
+                (low_confidence_threshold,),
             ).fetchone()[0]
 
             # Never accessed entries
@@ -1341,7 +1353,8 @@ class ContextStore:
             "total_entries": total_entries,
             "total_edges": total_edges,
             "superseded_entries": superseded_count,
-            "unresolved_conflicts": conflicted_count // 2,  # Divide by 2 since each conflict involves 2 entries
+            "unresolved_conflicts": conflicted_count
+            // 2,  # Divide by 2 since each conflict involves 2 entries
             "stale_entries": stale_count,
             "orphan_entries": orphan_count,
             "low_confidence_entries": low_confidence_count,
@@ -1383,7 +1396,7 @@ class ContextStore:
                 ORDER BY updated_at ASC
                 LIMIT ?
                 """,
-                (threshold.isoformat(), limit)
+                (threshold.isoformat(), limit),
             ).fetchall()
             entries = [self.get(row["id"]) for row in rows]
             return [e for e in entries if e is not None]
@@ -1402,7 +1415,7 @@ class ContextStore:
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
-                (limit,)
+                (limit,),
             ).fetchall()
             entries = [self.get(row["id"]) for row in rows]
             return [e for e in entries if e is not None]
@@ -1417,7 +1430,7 @@ class ContextStore:
                 WHERE e.edge_type = ?
                 LIMIT ?
                 """,
-                (EdgeType.CONFLICTS_WITH.value, limit)
+                (EdgeType.CONFLICTS_WITH.value, limit),
             ).fetchall()
 
             results = []
@@ -1425,11 +1438,13 @@ class ContextStore:
                 source = self.get(row["source_id"])
                 target = self.get(row["target_id"])
                 if source and target:
-                    results.append({
-                        "entry1": source,
-                        "entry2": target,
-                        "confidence": row["confidence"],
-                    })
+                    results.append(
+                        {
+                            "entry1": source,
+                            "entry2": target,
+                            "confidence": row["confidence"],
+                        }
+                    )
             return results
 
     def _create_version(
@@ -1443,8 +1458,7 @@ class ContextStore:
             # Get next version number
             with self._read_transaction() as conn:
                 row = conn.execute(
-                    "SELECT MAX(version) FROM context_versions WHERE entry_id = ?",
-                    (entry.id,)
+                    "SELECT MAX(version) FROM context_versions WHERE entry_id = ?", (entry.id,)
                 ).fetchone()
                 version = (row[0] or 0) + 1
 
@@ -1499,7 +1513,7 @@ class ContextStore:
                 ORDER BY version DESC
                 LIMIT ?
                 """,
-                (entry_id, limit)
+                (entry_id, limit),
             ).fetchall()
 
             return [
@@ -1598,7 +1612,7 @@ class ContextStore:
                 ORDER BY recall_count DESC
                 LIMIT 10
                 """,
-                (since.isoformat(),)
+                (since.isoformat(),),
             ).fetchall()
 
             return {
@@ -1608,8 +1622,7 @@ class ContextStore:
                     for r in rows
                 ],
                 "top_recalled": [
-                    {"entry_id": r["entry_id"], "recall_count": r["recall_count"]}
-                    for r in top_rows
+                    {"entry_id": r["entry_id"], "recall_count": r["recall_count"]} for r in top_rows
                 ],
             }
 
@@ -1623,7 +1636,16 @@ class ContextStore:
         existing_lower = existing_content.lower()
 
         # Check for negation patterns
-        negation_words = ["not", "never", "don't", "doesn't", "shouldn't", "won't", "cannot", "disable"]
+        negation_words = [
+            "not",
+            "never",
+            "don't",
+            "doesn't",
+            "shouldn't",
+            "won't",
+            "cannot",
+            "disable",
+        ]
         new_has_negation = any(word in new_lower for word in negation_words)
         existing_has_negation = any(word in existing_lower for word in negation_words)
 
@@ -1638,7 +1660,11 @@ class ContextStore:
             if pattern in new_lower and pattern in existing_lower:
                 # Extract what follows the pattern
                 new_choice = new_lower.split(pattern)[-1].split()[0] if pattern in new_lower else ""
-                existing_choice = existing_lower.split(pattern)[-1].split()[0] if pattern in existing_lower else ""
+                existing_choice = (
+                    existing_lower.split(pattern)[-1].split()[0]
+                    if pattern in existing_lower
+                    else ""
+                )
                 if new_choice and existing_choice and new_choice != existing_choice:
                     return True
 

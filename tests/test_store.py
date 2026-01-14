@@ -808,7 +808,9 @@ class TestGraphValidity:
 
     def test_appears_contradictory_different_choices(self, store: ContextStore) -> None:
         """Test _appears_contradictory detects different choices."""
-        assert store._appears_contradictory("Use React for the frontend", "Use Vue for the frontend")
+        assert store._appears_contradictory(
+            "Use React for the frontend", "Use Vue for the frontend"
+        )
         assert store._appears_contradictory("Prefer tabs", "Prefer spaces")
 
 

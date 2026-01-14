@@ -15,11 +15,11 @@ from enyal.models.context import (
 # Default decay rates by content type (multiplier for freshness_boost)
 # Higher values mean faster decay (more sensitive to time)
 DEFAULT_DECAY_RATES: dict[ContextType, float] = {
-    ContextType.FACT: 1.0,           # Facts decay at normal rate
-    ContextType.PREFERENCE: 0.5,      # Preferences are more stable
-    ContextType.DECISION: 0.3,        # Decisions are even more stable
-    ContextType.CONVENTION: 0.2,      # Conventions rarely change
-    ContextType.PATTERN: 0.4,         # Patterns are moderately stable
+    ContextType.FACT: 1.0,  # Facts decay at normal rate
+    ContextType.PREFERENCE: 0.5,  # Preferences are more stable
+    ContextType.DECISION: 0.3,  # Decisions are even more stable
+    ContextType.CONVENTION: 0.2,  # Conventions rarely change
+    ContextType.PATTERN: 0.4,  # Patterns are moderately stable
 }
 
 
@@ -185,14 +185,18 @@ class RetrievalEngine:
                 + self.recency_weight * recency_score
             ) * effective_confidence
 
-            results.append({
-                "entry": entry,
-                "distance": distance,
-                "score": combined_score,
-            })
+            results.append(
+                {
+                    "entry": entry,
+                    "distance": distance,
+                    "score": combined_score,
+                }
+            )
 
         # Get validity information from graph
-        superseded_ids = self.store.get_superseded_ids() if (exclude_superseded or flag_conflicts) else set()
+        superseded_ids = (
+            self.store.get_superseded_ids() if (exclude_superseded or flag_conflicts) else set()
+        )
         conflicted_ids = self.store.get_conflicted_ids() if flag_conflicts else set()
 
         # Filter and annotate results with validity metadata

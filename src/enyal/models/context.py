@@ -97,7 +97,9 @@ class ContextSearchResult(BaseModel):
     superseded_by: str | None = Field(default=None, description="ID of superseding entry")
     has_conflicts: bool = Field(default=False, description="Entry has unresolved conflicts")
     freshness_score: float = Field(default=1.0, description="Time-based freshness (0-1)")
-    adjusted_score: float | None = Field(default=None, description="Score after validity adjustments")
+    adjusted_score: float | None = Field(
+        default=None, description="Score after validity adjustments"
+    )
 
     model_config = {"frozen": True}
 
