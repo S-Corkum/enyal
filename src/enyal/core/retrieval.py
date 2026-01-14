@@ -3,6 +3,7 @@
 import math
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from enyal.core.store import ContextStore
 from enyal.models.context import (
@@ -94,7 +95,7 @@ class RetrievalEngine:
         )
 
         # Build lookup maps
-        semantic_map: dict[str, dict] = {r["entry"].id: r for r in semantic_results}
+        semantic_map: dict[str, dict[str, Any]] = {r["entry"].id: r for r in semantic_results}
         fts_scores: dict[str, float] = {
             r["entry_id"]: self._normalize_bm25(r["bm25_score"]) for r in fts_results
         }
