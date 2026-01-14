@@ -483,6 +483,9 @@ class ContextStore:
 
         logger.info(f"Stored context entry: {entry.id}")
 
+        # Create initial version record
+        self._create_version(entry, "created", version=1)
+
         # Build return value based on what was requested
         # Maintain backward compatibility: only return dict if explicitly requested
         if check_duplicate or detect_conflicts or suggest_supersedes:
@@ -802,7 +805,15 @@ class ContextStore:
                     (serialize_embedding(embedding), entry_id),
                 )
 
-            return result.rowcount > 0
+            updated = result.rowcount > 0
+
+        # Create version record if update succeeded
+        if updated:
+            entry = self.get(entry_id)
+            if entry:
+                self._create_version(entry, "updated")
+
+        return updated
 
     def stats(self) -> ContextStats:
         """

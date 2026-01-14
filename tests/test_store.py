@@ -885,23 +885,29 @@ class TestHealthCheck:
 class TestVersioning:
     """Tests for entry versioning functionality."""
 
-    def test_get_history_empty(self, store: ContextStore) -> None:
-        """Test get_history for entry with no version history."""
+    def test_get_history_initial_version(self, store: ContextStore) -> None:
+        """Test that remember() automatically creates initial version."""
         entry_id = store.remember(content="New entry")
         history = store.get_history(entry_id)
-        assert history == []  # No versions created yet by default
-
-    def test_create_version(self, store: ContextStore) -> None:
-        """Test creating a version record."""
-        entry_id = store.remember(content="Original content")
-        entry = store.get(entry_id)
-        store._create_version(entry, "created", version=1)
-
-        history = store.get_history(entry_id)
-        assert len(history) == 1
+        assert len(history) == 1  # Initial version created automatically
         assert history[0]["version"] == 1
         assert history[0]["change_type"] == "created"
-        assert history[0]["content"] == "Original content"
+        assert history[0]["content"] == "New entry"
+
+    def test_version_on_update(self, store: ContextStore) -> None:
+        """Test that update() creates a new version."""
+        entry_id = store.remember(content="Original content")
+        store.update(entry_id, content="Updated content")
+
+        history = store.get_history(entry_id)
+        assert len(history) == 2  # Initial + update
+        # History is ordered by version DESC
+        assert history[0]["version"] == 2
+        assert history[0]["change_type"] == "updated"
+        assert history[0]["content"] == "Updated content"
+        assert history[1]["version"] == 1
+        assert history[1]["change_type"] == "created"
+        assert history[1]["content"] == "Original content"
 
 
 class TestAnalytics:
