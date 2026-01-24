@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from enyal.core.migration import MigrationManager, MigrationStatus
+from enyal.core.migration import EMBEDDING_VERSION, MigrationManager, MigrationStatus
 from enyal.embeddings.models import MODEL_REGISTRY
 
 
@@ -117,7 +117,12 @@ def _create_legacy_db(db_path: Path, num_entries: int = 3) -> None:
     conn.close()
 
 
-def _create_db_with_meta(db_path: Path, model_name: str, dimension: int) -> None:
+def _create_db_with_meta(
+    db_path: Path,
+    model_name: str,
+    dimension: int,
+    embedding_version: str | None = None,
+) -> None:
     """Create a database with schema_meta tracking a specific model."""
     conn = sqlite3.connect(str(db_path))
 
@@ -171,6 +176,11 @@ def _create_db_with_meta(db_path: Path, model_name: str, dimension: int) -> None
         "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?)",
         ("embedding_dimension", str(dimension), "2024-01-01T00:00:00"),
     )
+    if embedding_version is not None:
+        conn.execute(
+            "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?)",
+            ("embedding_version", embedding_version, "2024-01-01T00:00:00"),
+        )
 
     conn.commit()
     conn.close()
@@ -222,9 +232,48 @@ class TestMigrationStatus:
         assert status == MigrationStatus.NEEDS_MIGRATION
         conn.close()
 
+    def test_needs_migration_version_changed(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+        """Test NEEDS_MIGRATION when embedding version differs."""
+        _create_db_with_meta(
+            temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768, embedding_version="0"
+        )
+        conn = sqlite3.connect(str(temp_db_path))
+
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+        except Exception:
+            pytest.skip("sqlite-vec not available")
+
+        manager = MigrationManager(mock_engine_768)
+        status = manager.check_status(conn)
+        assert status == MigrationStatus.NEEDS_MIGRATION
+        conn.close()
+
+    def test_needs_migration_no_version(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+        """Test NEEDS_MIGRATION when embedding_version key is missing."""
+        _create_db_with_meta(temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768)
+        conn = sqlite3.connect(str(temp_db_path))
+
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+        except Exception:
+            pytest.skip("sqlite-vec not available")
+
+        manager = MigrationManager(mock_engine_768)
+        status = manager.check_status(conn)
+        assert status == MigrationStatus.NEEDS_MIGRATION
+        conn.close()
+
     def test_current_status_matches(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
         """Test CURRENT status when meta matches engine config."""
-        _create_db_with_meta(temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768)
+        _create_db_with_meta(
+            temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768,
+            embedding_version=EMBEDDING_VERSION,
+        )
         conn = sqlite3.connect(str(temp_db_path))
 
         try:
@@ -280,6 +329,11 @@ class TestMigrationExecution:
             "SELECT value FROM schema_meta WHERE key = 'embedding_dimension'"
         ).fetchone()
         assert dim_row[0] == "768"
+
+        ver_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'embedding_version'"
+        ).fetchone()
+        assert ver_row[0] == EMBEDDING_VERSION
 
         conn.close()
 

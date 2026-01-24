@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Bump this when embedding strategy changes (e.g., adding normalization)
+# without changing the model name or dimension.
+EMBEDDING_VERSION = "1"
+
 
 class MigrationStatus(Enum):
     """Status of the database schema relative to current model config."""
@@ -109,6 +113,15 @@ class MigrationManager:
             stored_dim = int(dim_row[0])
             if stored_dim != self._engine.config.dimension:
                 return MigrationStatus.NEEDS_MIGRATION
+
+        # Check embedding version (catches strategy changes like normalization)
+        ver_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'embedding_version'"
+        ).fetchone()
+
+        stored_version = ver_row[0] if ver_row else "0"
+        if stored_version != EMBEDDING_VERSION:
+            return MigrationStatus.NEEDS_MIGRATION
 
         return MigrationStatus.CURRENT
 
@@ -305,4 +318,8 @@ class MigrationManager:
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?)",
             ("embedding_dimension", str(self._engine.config.dimension), now),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?)",
+            ("embedding_version", EMBEDDING_VERSION, now),
         )

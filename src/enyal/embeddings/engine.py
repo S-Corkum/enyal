@@ -113,41 +113,60 @@ class EmbeddingEngine:
             logger.info("Embedding model loaded successfully")
         return self._model
 
+    @staticmethod
+    def _normalize(vec: NDArray[np.float32]) -> NDArray[np.float32]:
+        """L2-normalize a vector or batch of vectors to unit length.
+
+        This ensures L2 distance approximates cosine distance (range 0-2),
+        making the similarity formula 1/(1+d) produce meaningful scores.
+        """
+        if vec.ndim == 1:
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+        else:
+            norms = np.linalg.norm(vec, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)  # avoid division by zero
+            vec = vec / norms
+        return vec.astype(np.float32)
+
     def embed(self, text: str) -> NDArray[np.float32]:
         """
         Generate embedding for a single text (for storage/indexing).
 
         Applies the document_prefix from config before encoding.
+        Output is L2-normalized to unit length.
 
         Args:
             text: The text to embed.
 
         Returns:
-            A float32 numpy array of shape (dimension,).
+            A unit-length float32 numpy array of shape (dimension,).
         """
         prefixed = f"{self._config.document_prefix}{text}"
         model = self.get_model()
         embedding: Any = model.encode(prefixed, convert_to_numpy=True)
         result: NDArray[np.float32] = embedding.astype(np.float32)
-        return result
+        return self._normalize(result)
 
     def embed_query(self, text: str) -> NDArray[np.float32]:
         """
         Generate embedding for a search query.
 
         Applies the query_prefix from config before encoding.
+        Output is L2-normalized to unit length.
 
         Args:
             text: The query text to embed.
 
         Returns:
-            A float32 numpy array of shape (dimension,).
+            A unit-length float32 numpy array of shape (dimension,).
         """
         prefixed = f"{self._config.query_prefix}{text}"
         model = self.get_model()
         embedding: Any = model.encode(prefixed, convert_to_numpy=True)
         result: NDArray[np.float32] = embedding.astype(np.float32)
-        return result
+        return self._normalize(result)
 
     def embed_batch(
         self,
@@ -158,13 +177,15 @@ class EmbeddingEngine:
         """
         Generate embeddings for multiple texts efficiently.
 
+        Output vectors are L2-normalized to unit length.
+
         Args:
             texts: List of texts to embed.
             task: Either "document" (applies document_prefix) or "query" (applies query_prefix).
             batch_size: Number of texts to process at once.
 
         Returns:
-            A (N, dimension) float32 numpy array where N is len(texts).
+            A (N, dimension) float32 numpy array of unit-length vectors.
         """
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, self._config.dimension)
@@ -180,7 +201,7 @@ class EmbeddingEngine:
             show_progress_bar=len(texts) > 100,
         )
         result: NDArray[np.float32] = embeddings.astype(np.float32)
-        return result
+        return self._normalize(result)
 
     def embedding_dimension(self) -> int:
         """Return the embedding dimension for the configured model."""
