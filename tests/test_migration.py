@@ -45,6 +45,7 @@ def _create_legacy_db(db_path: Path, num_entries: int = 3) -> None:
     # Load sqlite-vec
     try:
         import sqlite_vec
+
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
     except Exception:
@@ -128,6 +129,7 @@ def _create_db_with_meta(
 
     try:
         import sqlite_vec
+
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
     except Exception:
@@ -205,6 +207,7 @@ class TestMigrationStatus:
 
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -215,13 +218,16 @@ class TestMigrationStatus:
         assert status == MigrationStatus.LEGACY
         conn.close()
 
-    def test_needs_migration_model_changed(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_needs_migration_model_changed(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test NEEDS_MIGRATION when model name differs."""
         _create_db_with_meta(temp_db_path, "all-MiniLM-L6-v2", 384)
         conn = sqlite3.connect(str(temp_db_path))
 
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -232,7 +238,9 @@ class TestMigrationStatus:
         assert status == MigrationStatus.NEEDS_MIGRATION
         conn.close()
 
-    def test_needs_migration_version_changed(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_needs_migration_version_changed(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test NEEDS_MIGRATION when embedding version differs."""
         _create_db_with_meta(
             temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768, embedding_version="0"
@@ -241,6 +249,7 @@ class TestMigrationStatus:
 
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -251,13 +260,16 @@ class TestMigrationStatus:
         assert status == MigrationStatus.NEEDS_MIGRATION
         conn.close()
 
-    def test_needs_migration_no_version(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_needs_migration_no_version(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test NEEDS_MIGRATION when embedding_version key is missing."""
         _create_db_with_meta(temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768)
         conn = sqlite3.connect(str(temp_db_path))
 
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -271,13 +283,16 @@ class TestMigrationStatus:
     def test_current_status_matches(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
         """Test CURRENT status when meta matches engine config."""
         _create_db_with_meta(
-            temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768,
+            temp_db_path,
+            "nomic-ai/nomic-embed-text-v1.5",
+            768,
             embedding_version=EMBEDDING_VERSION,
         )
         conn = sqlite3.connect(str(temp_db_path))
 
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -299,6 +314,7 @@ class TestMigrationExecution:
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -320,9 +336,7 @@ class TestMigrationExecution:
         assert result.error is None
 
         # Verify schema_meta was written
-        row = conn.execute(
-            "SELECT value FROM schema_meta WHERE key = 'embedding_model'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'embedding_model'").fetchone()
         assert row[0] == "nomic-ai/nomic-embed-text-v1.5"
 
         dim_row = conn.execute(
@@ -342,6 +356,7 @@ class TestMigrationExecution:
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -370,13 +385,16 @@ class TestMigrationExecution:
         assert result.entries_migrated == 0
         conn.close()
 
-    def test_migrate_preserves_content(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_migrate_preserves_content(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test that migration preserves entry content."""
         _create_legacy_db(temp_db_path, num_entries=2)
 
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -407,6 +425,7 @@ class TestMigrationExecution:
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -435,6 +454,7 @@ class TestMigrationExecution:
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -465,13 +485,16 @@ class TestMigrationExecution:
 
         conn.close()
 
-    def test_migrate_failure_returns_error(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_migrate_failure_returns_error(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test that migration failure returns error in result."""
         _create_legacy_db(temp_db_path, num_entries=2)
 
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -493,11 +516,14 @@ class TestMigrationExecution:
 class TestFreshSchema:
     """Tests for fresh schema creation."""
 
-    def test_ensure_fresh_schema_creates_vectors(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_ensure_fresh_schema_creates_vectors(
+        self, temp_db_path: Path, mock_engine_768: MagicMock
+    ) -> None:
         """Test that ensure_fresh_schema creates the vectors table."""
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -531,6 +557,7 @@ class TestFreshSchema:
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -551,12 +578,15 @@ class TestFreshSchema:
 class TestMigrationProgress:
     """Tests for migration progress logging."""
 
-    def test_large_batch_logs_progress(self, temp_db_path: Path, mock_engine_768: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    def test_large_batch_logs_progress(
+        self, temp_db_path: Path, mock_engine_768: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Test that large migrations log progress."""
         # Create a DB with enough entries to trigger progress logging
         conn = sqlite3.connect(str(temp_db_path))
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
@@ -597,6 +627,7 @@ class TestMigrationProgress:
         manager = MigrationManager(mock_engine_768)
 
         import logging
+
         with caplog.at_level(logging.INFO, logger="enyal.core.migration"):
             result = manager.migrate(conn)
             conn.commit()

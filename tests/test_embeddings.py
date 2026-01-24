@@ -265,7 +265,10 @@ class TestEmbeddingEngine:
 
         with (
             patch("enyal.embeddings.engine._ensure_ssl_configured"),
-            patch("enyal.core.ssl_config.get_model_path", return_value="nomic-ai/nomic-embed-text-v1.5"),
+            patch(
+                "enyal.core.ssl_config.get_model_path",
+                return_value="nomic-ai/nomic-embed-text-v1.5",
+            ),
             patch("sentence_transformers.SentenceTransformer") as mock_st,
         ):
             mock_st.return_value = MagicMock()

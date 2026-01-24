@@ -91,9 +91,7 @@ class MigrationManager:
             return MigrationStatus.FRESH
 
         # schema_meta exists - check if model matches
-        row = conn.execute(
-            "SELECT value FROM schema_meta WHERE key = 'embedding_model'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'embedding_model'").fetchone()
 
         if not row:
             return MigrationStatus.LEGACY
@@ -172,9 +170,7 @@ class MigrationManager:
         else:
             old_model = "all-MiniLM-L6-v2"
 
-        logger.info(
-            f"Starting migration: {old_model} ({old_dim}d) -> {new_model} ({new_dim}d)"
-        )
+        logger.info(f"Starting migration: {old_model} ({old_dim}d) -> {new_model} ({new_dim}d)")
 
         try:
             # Step 1: Read all entries that have vectors
@@ -256,9 +252,7 @@ class MigrationManager:
             self._write_schema_meta(conn)
 
             duration = time.time() - start_time
-            logger.info(
-                f"Migration complete: {total} entries in {duration:.1f}s"
-            )
+            logger.info(f"Migration complete: {total} entries in {duration:.1f}s")
 
             return MigrationResult(
                 success=True,
@@ -309,7 +303,9 @@ class MigrationManager:
         now = datetime.now(UTC).replace(tzinfo=None).isoformat()
 
         # Ensure schema_meta table exists
-        conn.execute(SCHEMA_META_SQL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE IF NOT EXISTS"))
+        conn.execute(
+            SCHEMA_META_SQL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE IF NOT EXISTS")
+        )
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?)",
