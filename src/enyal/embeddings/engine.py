@@ -1,10 +1,14 @@
 """Embedding engine for generating text embeddings."""
 
+from __future__ import annotations
+
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+from enyal.embeddings.models import ModelConfig
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -41,10 +45,13 @@ def _ensure_ssl_configured() -> None:
 
 class EmbeddingEngine:
     """
-    Lazy-loaded embedding engine using sentence-transformers.
+    Instance-based embedding engine using sentence-transformers.
 
     The model is loaded only when first needed, reducing cold start time
     for operations that don't require embeddings.
+
+    Supports configurable models with prefix-based asymmetric embedding
+    (different prefixes for documents vs queries).
 
     SSL Configuration:
         The engine automatically configures SSL settings from environment variables
@@ -57,12 +64,21 @@ class EmbeddingEngine:
         - ENYAL_OFFLINE_MODE: Set to "true" to prevent network calls
     """
 
-    _model: ClassVar["SentenceTransformer | None"] = None
-    _model_name: ClassVar[str] = "all-MiniLM-L6-v2"
-    _embedding_dim: ClassVar[int] = 384
+    def __init__(self, config: ModelConfig | None = None) -> None:
+        """Initialize the embedding engine.
 
-    @classmethod
-    def get_model(cls) -> "SentenceTransformer":
+        Args:
+            config: Model configuration. If None, uses ModelConfig.from_env().
+        """
+        self._config = config or ModelConfig.from_env()
+        self._model: SentenceTransformer | None = None
+
+    @property
+    def config(self) -> ModelConfig:
+        """Return the model configuration."""
+        return self._config
+
+    def get_model(self) -> SentenceTransformer:
         """
         Get the sentence transformer model, loading it if necessary.
 
@@ -77,56 +93,88 @@ class EmbeddingEngine:
                 Configure ENYAL_SSL_CERT_FILE with your CA bundle.
             RuntimeError: If offline mode is enabled but model is not cached.
         """
-        if cls._model is None:
+        if self._model is None:
             # Configure SSL before importing sentence_transformers
             _ensure_ssl_configured()
 
             from enyal.core.ssl_config import get_model_path
 
             # Get model path (local or model name for download)
-            model_path = get_model_path(cls._model_name)
+            model_path = get_model_path(self._config.name)
 
             logger.info(f"Loading embedding model: {model_path}")
             from sentence_transformers import SentenceTransformer
 
-            cls._model = SentenceTransformer(model_path)
-            logger.info("Embedding model loaded successfully")
-        return cls._model
+            kwargs: dict[str, Any] = {}
+            if self._config.trust_remote_code:
+                kwargs["trust_remote_code"] = True
 
-    @classmethod
-    def embed(cls, text: str) -> NDArray[np.float32]:
+            self._model = SentenceTransformer(model_path, **kwargs)
+            logger.info("Embedding model loaded successfully")
+        return self._model
+
+    def embed(self, text: str) -> NDArray[np.float32]:
         """
-        Generate embedding for a single text.
+        Generate embedding for a single text (for storage/indexing).
+
+        Applies the document_prefix from config before encoding.
 
         Args:
             text: The text to embed.
 
         Returns:
-            A 384-dimensional float32 numpy array.
+            A float32 numpy array of shape (dimension,).
         """
-        model = cls.get_model()
-        embedding: Any = model.encode(text, convert_to_numpy=True)
+        prefixed = f"{self._config.document_prefix}{text}"
+        model = self.get_model()
+        embedding: Any = model.encode(prefixed, convert_to_numpy=True)
         result: NDArray[np.float32] = embedding.astype(np.float32)
         return result
 
-    @classmethod
-    def embed_batch(cls, texts: list[str], batch_size: int = 32) -> NDArray[np.float32]:
+    def embed_query(self, text: str) -> NDArray[np.float32]:
+        """
+        Generate embedding for a search query.
+
+        Applies the query_prefix from config before encoding.
+
+        Args:
+            text: The query text to embed.
+
+        Returns:
+            A float32 numpy array of shape (dimension,).
+        """
+        prefixed = f"{self._config.query_prefix}{text}"
+        model = self.get_model()
+        embedding: Any = model.encode(prefixed, convert_to_numpy=True)
+        result: NDArray[np.float32] = embedding.astype(np.float32)
+        return result
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        task: str = "document",
+        batch_size: int = 32,
+    ) -> NDArray[np.float32]:
         """
         Generate embeddings for multiple texts efficiently.
 
         Args:
             texts: List of texts to embed.
+            task: Either "document" (applies document_prefix) or "query" (applies query_prefix).
             batch_size: Number of texts to process at once.
 
         Returns:
-            A (N, 384) float32 numpy array where N is len(texts).
+            A (N, dimension) float32 numpy array where N is len(texts).
         """
         if not texts:
-            return np.array([], dtype=np.float32).reshape(0, cls._embedding_dim)
+            return np.array([], dtype=np.float32).reshape(0, self._config.dimension)
 
-        model = cls.get_model()
+        prefix = self._config.document_prefix if task == "document" else self._config.query_prefix
+        prefixed = [f"{prefix}{t}" for t in texts]
+
+        model = self.get_model()
         embeddings: Any = model.encode(
-            texts,
+            prefixed,
             convert_to_numpy=True,
             batch_size=batch_size,
             show_progress_bar=len(texts) > 100,
@@ -134,24 +182,20 @@ class EmbeddingEngine:
         result: NDArray[np.float32] = embeddings.astype(np.float32)
         return result
 
-    @classmethod
-    def embedding_dimension(cls) -> int:
-        """Return the embedding dimension (384 for all-MiniLM-L6-v2)."""
-        return cls._embedding_dim
+    def embedding_dimension(self) -> int:
+        """Return the embedding dimension for the configured model."""
+        return self._config.dimension
 
-    @classmethod
-    def is_loaded(cls) -> bool:
+    def is_loaded(self) -> bool:
         """Check if the model is currently loaded."""
-        return cls._model is not None
+        return self._model is not None
 
-    @classmethod
-    def preload(cls) -> None:
+    def preload(self) -> None:
         """Preload the model (useful for warming up during startup)."""
-        cls.get_model()
+        self.get_model()
 
-    @classmethod
-    def unload(cls) -> None:
+    def unload(self) -> None:
         """Unload the model to free memory."""
-        if cls._model is not None:
+        if self._model is not None:
             logger.info("Unloading embedding model")
-            cls._model = None
+            self._model = None

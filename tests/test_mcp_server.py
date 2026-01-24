@@ -53,7 +53,11 @@ class TestGetStore:
 
     def test_get_store_initialization(self, server_module) -> None:
         """Test that get_store initializes and returns a store."""
-        with patch.object(server_module, "ContextStore") as mock_store_class:
+        with (
+            patch.object(server_module, "ContextStore") as mock_store_class,
+            patch("enyal.embeddings.engine.EmbeddingEngine"),
+            patch("enyal.embeddings.models.ModelConfig"),
+        ):
             mock_store = MagicMock()
             mock_store_class.return_value = mock_store
             server_module._store = None
@@ -68,6 +72,8 @@ class TestGetStore:
         with (
             patch.dict(os.environ, {"ENYAL_DB_PATH": "/custom/db/path.db"}),
             patch.object(server_module, "ContextStore") as mock_store_class,
+            patch("enyal.embeddings.engine.EmbeddingEngine"),
+            patch("enyal.embeddings.models.ModelConfig"),
         ):
             mock_store = MagicMock()
             mock_store_class.return_value = mock_store
@@ -75,11 +81,15 @@ class TestGetStore:
 
             server_module.get_store()
 
-            mock_store_class.assert_called_once_with("/custom/db/path.db")
+            assert mock_store_class.call_args[0][0] == "/custom/db/path.db"
 
     def test_get_store_caches_instance(self, server_module) -> None:
         """Test that get_store returns cached instance on subsequent calls."""
-        with patch.object(server_module, "ContextStore") as mock_store_class:
+        with (
+            patch.object(server_module, "ContextStore") as mock_store_class,
+            patch("enyal.embeddings.engine.EmbeddingEngine"),
+            patch("enyal.embeddings.models.ModelConfig"),
+        ):
             mock_store = MagicMock()
             mock_store_class.return_value = mock_store
             server_module._store = None
@@ -100,6 +110,8 @@ class TestGetRetrieval:
         with (
             patch.object(server_module, "ContextStore"),
             patch.object(server_module, "RetrievalEngine") as mock_retrieval_class,
+            patch("enyal.embeddings.engine.EmbeddingEngine"),
+            patch("enyal.embeddings.models.ModelConfig"),
         ):
             mock_retrieval = MagicMock()
             mock_retrieval_class.return_value = mock_retrieval
@@ -116,6 +128,8 @@ class TestGetRetrieval:
         with (
             patch.object(server_module, "ContextStore"),
             patch.object(server_module, "RetrievalEngine") as mock_retrieval_class,
+            patch("enyal.embeddings.engine.EmbeddingEngine"),
+            patch("enyal.embeddings.models.ModelConfig"),
         ):
             mock_retrieval = MagicMock()
             mock_retrieval_class.return_value = mock_retrieval
