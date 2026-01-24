@@ -7,13 +7,17 @@ import sys
 
 from enyal.core.retrieval import RetrievalEngine
 from enyal.core.store import ContextStore
+from enyal.embeddings.engine import EmbeddingEngine
+from enyal.embeddings.models import ModelConfig
 from enyal.models.context import ContextType, ScopeLevel
 
 
 def get_store(db_path: str | None = None) -> ContextStore:
     """Get or create a context store."""
     path = db_path or os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
-    return ContextStore(path)
+    config = ModelConfig.from_env()
+    engine = EmbeddingEngine(config)
+    return ContextStore(path, engine=engine)
 
 
 def cmd_remember(args: argparse.Namespace) -> int:
@@ -160,7 +164,7 @@ def cmd_model_download(args: argparse.Namespace) -> int:
     """Handle the model download command."""
     from enyal.core.ssl_config import download_model
 
-    model_name = args.model or "all-MiniLM-L6-v2"
+    model_name = args.model or ModelConfig.default().name
 
     try:
         print(f"Downloading model: {model_name}")
@@ -198,12 +202,13 @@ def cmd_model_verify(args: argparse.Namespace) -> int:
 
     model_path = args.model
 
-    print(f"Verifying model: {model_path or 'default (all-MiniLM-L6-v2)'}")
+    default_name = ModelConfig.default().name
+    print(f"Verifying model: {model_path or f'default ({default_name})'}")
 
     success = verify_model(model_path)
 
     if args.json:
-        print(json.dumps({"success": success, "model": model_path or "all-MiniLM-L6-v2"}))
+        print(json.dumps({"success": success, "model": model_path or default_name}))
     else:
         if success:
             print("\nModel verification successful!")
@@ -448,7 +453,7 @@ def main() -> int:
     model_download_parser.add_argument(
         "--model",
         "-m",
-        help="Model name (default: all-MiniLM-L6-v2)",
+        help="Model name (default: nomic-ai/nomic-embed-text-v1.5)",
     )
     model_download_parser.add_argument(
         "--cache-dir",

@@ -1,6 +1,6 @@
 [project]
 name = "enyal"
-version = "0.2.0"
+version = "0.3.0"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,6 +30,8 @@ dependencies = [
     "pydantic>=2.0.0",
     # sentence-transformers handles torch as transitive dependency
     "sentence-transformers>=3.0.0",
+    # Required for nomic-embed-text-v1.5 model architecture
+    "einops>=0.7.0",
     # NumPy: 2.0+ for Python 3.13, 1.26.x for Python 3.11-3.12
     "numpy>=2.0.0; python_version >= '3.13'",
     "numpy>=1.26.0,<2.0.0; python_version < '3.13'",

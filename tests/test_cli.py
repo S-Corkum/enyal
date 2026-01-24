@@ -33,27 +33,35 @@ class TestGetStore:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("enyal.cli.main.ContextStore") as mock_store_class,
+            patch("enyal.cli.main.EmbeddingEngine"),
+            patch("enyal.cli.main.ModelConfig"),
         ):
             mock_store_class.return_value = MagicMock()
             get_store()
-            mock_store_class.assert_called_once_with("~/.enyal/context.db")
+            assert mock_store_class.call_args[0][0] == "~/.enyal/context.db"
 
     def test_get_store_custom_path(self) -> None:
         """Test get_store with custom path."""
-        with patch("enyal.cli.main.ContextStore") as mock_store_class:
+        with (
+            patch("enyal.cli.main.ContextStore") as mock_store_class,
+            patch("enyal.cli.main.EmbeddingEngine"),
+            patch("enyal.cli.main.ModelConfig"),
+        ):
             mock_store_class.return_value = MagicMock()
             get_store("/custom/path/to/db")
-            mock_store_class.assert_called_once_with("/custom/path/to/db")
+            assert mock_store_class.call_args[0][0] == "/custom/path/to/db"
 
     def test_get_store_env_var_path(self) -> None:
         """Test get_store uses environment variable."""
         with (
             patch.dict(os.environ, {"ENYAL_DB_PATH": "/env/path/db"}, clear=True),
             patch("enyal.cli.main.ContextStore") as mock_store_class,
+            patch("enyal.cli.main.EmbeddingEngine"),
+            patch("enyal.cli.main.ModelConfig"),
         ):
             mock_store_class.return_value = MagicMock()
             get_store()
-            mock_store_class.assert_called_once_with("/env/path/db")
+            assert mock_store_class.call_args[0][0] == "/env/path/db"
 
 
 class TestCmdRemember:
@@ -613,6 +621,8 @@ class TestMainEntrypoint:
         with (
             patch("sys.argv", ["enyal", *test_args]),
             patch("enyal.cli.main.ContextStore") as mock_store_class,
+            patch("enyal.cli.main.EmbeddingEngine"),
+            patch("enyal.cli.main.ModelConfig"),
         ):
             mock_store = MagicMock()
             mock_store.stats.return_value = sample_stats
@@ -621,7 +631,7 @@ class TestMainEntrypoint:
             result = main()
 
             assert result == 0
-            mock_store_class.assert_called_with("/custom/path.db")
+            assert mock_store_class.call_args[0][0] == "/custom/path.db"
 
     def test_main_with_json_flag(self, sample_stats: ContextStats) -> None:
         """Test main function with --json flag."""

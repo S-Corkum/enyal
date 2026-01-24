@@ -27,9 +27,14 @@ def get_store() -> ContextStore:
     """Get or create the context store instance."""
     global _store
     if _store is None:
+        from enyal.embeddings.engine import EmbeddingEngine
+        from enyal.embeddings.models import ModelConfig
+
         db_path = os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
-        _store = ContextStore(db_path)
-        logger.info(f"Initialized context store at: {db_path}")
+        config = ModelConfig.from_env()
+        engine = EmbeddingEngine(config)
+        _store = ContextStore(db_path, engine=engine)
+        logger.info(f"Initialized context store at: {db_path} (model: {config.name})")
     return _store
 
 
@@ -1166,10 +1171,9 @@ def main() -> None:
 
     # Optionally preload the embedding model
     if os.environ.get("ENYAL_PRELOAD_MODEL", "").lower() == "true":
-        from enyal.embeddings.engine import EmbeddingEngine
-
+        store = get_store()
         logger.info("Preloading embedding model...")
-        EmbeddingEngine.preload()
+        store._engine.preload()
         logger.info("Embedding model preloaded")
 
     # Run the server

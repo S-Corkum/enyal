@@ -5,12 +5,13 @@ from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
 from enyal.models.context import (
     ContextEdge,
     ContextEntry,
@@ -37,16 +38,35 @@ def mock_embedding() -> NDArray[np.float32]:
 
 
 @pytest.fixture
-def mock_embedding_engine(mock_embedding: NDArray[np.float32]) -> Generator[MagicMock]:
-    """Mock the EmbeddingEngine to avoid model loading in tests."""
-    with patch("enyal.embeddings.engine.EmbeddingEngine") as mock_class:
-        mock_instance = mock_class
-        mock_instance.embed.return_value = mock_embedding
-        mock_instance.embed_batch.return_value = np.zeros((0, 384), dtype=np.float32)
-        mock_instance.embedding_dimension.return_value = 384
-        mock_instance.is_loaded.return_value = False
-        mock_instance._model = None
-        yield mock_instance
+def mock_embedding_768() -> NDArray[np.float32]:
+    """Return a mock 768-dimensional embedding."""
+    return np.random.rand(768).astype(np.float32)
+
+
+@pytest.fixture
+def mock_model_config() -> ModelConfig:
+    """Return the default nomic model config for tests."""
+    return MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+
+
+@pytest.fixture
+def mock_model_config_384() -> ModelConfig:
+    """Return the MiniLM 384-dim model config for tests."""
+    return MODEL_REGISTRY["all-MiniLM-L6-v2"]
+
+
+@pytest.fixture
+def mock_embedding_engine(mock_embedding_768: NDArray[np.float32]) -> MagicMock:
+    """Create a mock EmbeddingEngine instance to avoid model loading in tests."""
+    engine = MagicMock()
+    engine.config = MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+    engine.embed.return_value = mock_embedding_768
+    engine.embed_query.return_value = mock_embedding_768
+    engine.embed_batch.return_value = np.zeros((0, 768), dtype=np.float32)
+    engine.embedding_dimension.return_value = 768
+    engine.is_loaded.return_value = False
+    engine._model = None
+    return engine
 
 
 @pytest.fixture

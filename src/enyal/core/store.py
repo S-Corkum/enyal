@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from enyal.embeddings.engine import EmbeddingEngine
+from enyal.embeddings.models import ModelConfig
 from enyal.models.context import (
     ContextEdge,
     ContextEntry,
@@ -29,7 +30,7 @@ from enyal.models.context import (
 
 logger = logging.getLogger(__name__)
 
-# SQL Schema
+# SQL Schema (everything except context_vectors, which is managed by migration)
 SCHEMA_SQL = """
 -- Main context entries table
 CREATE TABLE IF NOT EXISTS context_entries (
@@ -48,12 +49,6 @@ CREATE TABLE IF NOT EXISTS context_entries (
     tags TEXT DEFAULT '[]',
     metadata TEXT DEFAULT '{}',
     is_deprecated INTEGER NOT NULL DEFAULT 0
-);
-
--- Vector embeddings (sqlite-vec virtual table)
-CREATE VIRTUAL TABLE IF NOT EXISTS context_vectors USING vec0(
-    entry_id TEXT PRIMARY KEY,
-    embedding float[384]
 );
 
 -- Full-text search
@@ -175,20 +170,24 @@ class ContextStore:
     Uses WAL mode for concurrent reads and application-level locking for writes.
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, engine: EmbeddingEngine | None = None):
         """
         Initialize the context store.
 
         Args:
             db_path: Path to the SQLite database file.
+            engine: EmbeddingEngine instance. If None, creates one from env config.
         """
         self.db_path = Path(db_path).expanduser()
+        self._engine = engine or EmbeddingEngine(ModelConfig.from_env())
         self._write_lock = threading.RLock()  # Reentrant lock for nested transactions
         self._local = threading.local()
         self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize the database schema."""
+        """Initialize the database schema and handle migrations."""
+        from enyal.core.migration import MigrationManager, MigrationStatus
+
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -203,9 +202,26 @@ class ContextStore:
                 logger.warning(f"Could not load sqlite-vec extension: {e}")
                 logger.warning("Vector search will not be available")
 
-            # Create schema
+            # Create base schema (everything except context_vectors)
             conn.executescript(SCHEMA_SQL)
             conn.commit()
+
+            # Handle vectors table via migration manager
+            manager = MigrationManager(self._engine)
+            status = manager.check_status(conn)
+
+            if status == MigrationStatus.FRESH:
+                manager.ensure_fresh_schema(conn)
+                conn.commit()
+            elif status in (MigrationStatus.LEGACY, MigrationStatus.NEEDS_MIGRATION):
+                result = manager.migrate(conn)
+                if not result.success:
+                    raise RuntimeError(
+                        f"Embedding migration failed: {result.error}. "
+                        f"Database may need manual intervention."
+                    )
+                conn.commit()
+            # MigrationStatus.CURRENT → no-op
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a thread-local database connection."""
@@ -366,7 +382,7 @@ class ContextStore:
                 # on_duplicate == "store" falls through to normal insert
 
         # Generate embedding
-        embedding = EmbeddingEngine.embed(content)
+        embedding = self._engine.embed(content)
 
         with self._write_transaction() as conn:
             # Insert metadata
@@ -541,7 +557,7 @@ class ContextStore:
             List of matching entries with relevance scores.
         """
         # Generate query embedding
-        query_embedding = EmbeddingEngine.embed(query)
+        query_embedding = self._engine.embed_query(query)
 
         with self._read_transaction() as conn:
             # Build the query with filters
@@ -689,7 +705,7 @@ class ContextStore:
         Returns:
             List of dicts with entry_id, similarity, and entry.
         """
-        embedding = EmbeddingEngine.embed(content)
+        embedding = self._engine.embed(content)
 
         with self._read_transaction() as conn:
             results = conn.execute(
@@ -813,7 +829,7 @@ class ContextStore:
 
             # Update embedding if content changed
             if content is not None and result.rowcount > 0:
-                embedding = EmbeddingEngine.embed(content)
+                embedding = self._engine.embed(content)
                 conn.execute(
                     "UPDATE context_vectors SET embedding = ? WHERE entry_id = ?",
                     (serialize_embedding(embedding), entry_id),

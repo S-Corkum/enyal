@@ -2,10 +2,13 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from enyal.core.store import ContextStore
+from enyal.embeddings.models import MODEL_REGISTRY
 from enyal.models.context import ContextType, EdgeType, ScopeLevel
 
 
@@ -16,10 +19,49 @@ def temp_db() -> Path:
         yield Path(tmpdir) / "test.db"
 
 
+def _word_based_embed(text: str) -> np.ndarray:
+    """Generate a deterministic embedding based on word content.
+
+    Uses word hashing to distribute words into embedding dimensions,
+    producing similar vectors for texts with shared words.
+    This gives realistic similarity behavior in tests.
+    """
+    embedding = np.zeros(768, dtype=np.float32)
+    words = text.lower().split()
+    for word in words:
+        # Each word activates a few dimensions based on its hash
+        word_hash = hash(word) % (2**31)
+        rng = np.random.RandomState(word_hash)
+        indices = rng.choice(768, size=min(10, 768), replace=False)
+        embedding[indices] += rng.rand(len(indices)).astype(np.float32)
+    # Normalize to unit vector
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
+    return embedding.astype(np.float32)
+
+
 @pytest.fixture
-def store(temp_db: Path) -> ContextStore:
-    """Create a test store."""
-    return ContextStore(temp_db)
+def mock_engine() -> MagicMock:
+    """Create a mock EmbeddingEngine for store tests.
+
+    Uses word-based embeddings: texts with shared words produce similar vectors,
+    texts with different words produce different vectors. This makes
+    similarity-based operations work realistically in tests.
+    """
+    engine = MagicMock()
+    engine.config = MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+    engine.embed.side_effect = _word_based_embed
+    engine.embed_query.side_effect = _word_based_embed
+    engine.embed_batch.return_value = np.zeros((0, 768), dtype=np.float32)
+    engine.embedding_dimension.return_value = 768
+    return engine
+
+
+@pytest.fixture
+def store(temp_db: Path, mock_engine: MagicMock) -> ContextStore:
+    """Create a test store with mock engine."""
+    return ContextStore(temp_db, engine=mock_engine)
 
 
 class TestContextStore:
