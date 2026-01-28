@@ -7,7 +7,7 @@ Enyal gives AI agents like Claude Code durable context that survives session res
 ## Features
 
 - **Persistent Memory**: Context survives restarts, crashes, and process termination
-- **Semantic Search**: Find relevant context using natural language queries (384-dim embeddings via all-MiniLM-L6-v2)
+- **Semantic Search**: Find relevant context using natural language queries (768-dim embeddings via nomic-embed-text-v1.5)
 - **Knowledge Graph**: Link related entries with relationships (supersedes, depends_on, conflicts_with, relates_to)
 - **Validity Tracking**: Automatically filter superseded entries and flag conflicts
 - **Entry Versioning**: Full history of changes with automatic version creation
