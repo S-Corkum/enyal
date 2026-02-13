@@ -1,5 +1,6 @@
 """Context store implementation using SQLite with sqlite-vec."""
 
+import contextlib
 import json
 import logging
 import os
@@ -191,53 +192,79 @@ class ContextStore:
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._get_connection() as conn:
-            # Load sqlite-vec extension
-            conn.enable_load_extension(True)
-            try:
-                import sqlite_vec  # type: ignore[import-untyped]
+        conn = self._get_connection()
 
-                sqlite_vec.load(conn)
-            except Exception as e:
-                logger.warning(f"Could not load sqlite-vec extension: {e}")
-                logger.warning("Vector search will not be available")
+        # Create base schema (everything except context_vectors)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
 
-            # Create base schema (everything except context_vectors)
-            conn.executescript(SCHEMA_SQL)
+        # Handle vectors table via migration manager
+        manager = MigrationManager(self._engine)
+        status = manager.check_status(conn)
+
+        if status == MigrationStatus.FRESH:
+            manager.ensure_fresh_schema(conn)
             conn.commit()
+        elif status in (MigrationStatus.LEGACY, MigrationStatus.NEEDS_MIGRATION):
+            result = manager.migrate(conn)
+            if not result.success:
+                raise RuntimeError(
+                    f"Embedding migration failed: {result.error}. "
+                    f"Database may need manual intervention."
+                )
+            conn.commit()
+        # MigrationStatus.CURRENT → no-op
 
-            # Handle vectors table via migration manager
-            manager = MigrationManager(self._engine)
-            status = manager.check_status(conn)
+    def _create_connection(self) -> sqlite3.Connection:
+        """Create a new SQLite connection with proper configuration.
 
-            if status == MigrationStatus.FRESH:
-                manager.ensure_fresh_schema(conn)
-                conn.commit()
-            elif status in (MigrationStatus.LEGACY, MigrationStatus.NEEDS_MIGRATION):
-                result = manager.migrate(conn)
-                if not result.success:
-                    raise RuntimeError(
-                        f"Embedding migration failed: {result.error}. "
-                        f"Database may need manual intervention."
-                    )
-                conn.commit()
-            # MigrationStatus.CURRENT → no-op
+        Includes loading the sqlite-vec extension for vector search support.
+        Every new connection (including reconnections and new threads) gets
+        a fully configured connection with all extensions loaded.
+        """
+        new_conn = sqlite3.connect(
+            str(self.db_path),
+            check_same_thread=False,
+            timeout=30.0,
+        )
+        new_conn.row_factory = sqlite3.Row
+        new_conn.execute("PRAGMA journal_mode=WAL")
+        new_conn.execute("PRAGMA busy_timeout=5000")
+        new_conn.execute("PRAGMA synchronous=NORMAL")
+        new_conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        new_conn.execute("PRAGMA foreign_keys=ON")
+
+        # Load sqlite-vec extension on every connection
+        new_conn.enable_load_extension(True)
+        try:
+            import sqlite_vec  # type: ignore[import-untyped]
+
+            sqlite_vec.load(new_conn)
+        except Exception as e:
+            logger.warning(f"Could not load sqlite-vec extension: {e}")
+            logger.warning("Vector search will not be available")
+
+        return new_conn
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a thread-local database connection."""
+        """Get a thread-local database connection with health checking.
+
+        Returns a cached connection for the current thread. If the cached
+        connection is invalid (closed, corrupted), it is replaced with a
+        fresh connection. New threads automatically get fully configured
+        connections with sqlite-vec loaded.
+        """
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            new_conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-                timeout=30.0,
-            )
-            new_conn.row_factory = sqlite3.Row
-            new_conn.execute("PRAGMA journal_mode=WAL")
-            new_conn.execute("PRAGMA busy_timeout=5000")
-            new_conn.execute("PRAGMA synchronous=NORMAL")
-            new_conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
-            new_conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = new_conn
+            self._local.conn = self._create_connection()
+        else:
+            # Health check: verify connection is still valid
+            try:
+                self._local.conn.execute("SELECT 1")
+            except (sqlite3.Error, sqlite3.ProgrammingError):
+                logger.warning("Database connection lost, reconnecting...")
+                with contextlib.suppress(Exception):
+                    self._local.conn.close()
+                self._local.conn = self._create_connection()
         result: sqlite3.Connection = self._local.conn
         return result
 
@@ -559,6 +586,9 @@ class ContextStore:
         # Generate query embedding
         query_embedding = self._engine.embed_query(query)
 
+        results: list[dict[str, Any]] = []
+        accessed_ids: list[str] = []
+
         with self._read_transaction() as conn:
             # Build the query with filters
             # First, get vector matches
@@ -611,22 +641,10 @@ class ContextStore:
             """
             rows = conn.execute(query_sql, params).fetchall()
 
-            # Update access timestamps
-            now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+            # Collect accessed IDs for later update (outside read transaction)
             accessed_ids = [dict(r)["id"] for r in rows]
-            if accessed_ids:
-                conn.execute(
-                    f"""
-                    UPDATE context_entries
-                    SET accessed_at = ?, access_count = access_count + 1
-                    WHERE id IN ({",".join("?" * len(accessed_ids))})
-                    """,
-                    [now, *accessed_ids],
-                )
-                conn.commit()
 
             # Build results with scores
-            results = []
             for row in rows:
                 row_dict = dict(row)
                 entry_id = row_dict["id"]
@@ -644,9 +662,34 @@ class ContextStore:
                     }
                 )
 
-            # Sort by score and limit
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:limit]
+        # Update access timestamps in a proper write transaction (non-critical)
+        if accessed_ids:
+            self._update_access_timestamps(accessed_ids)
+
+        # Sort by score and limit
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
+
+    def _update_access_timestamps(self, entry_ids: list[str]) -> None:
+        """Update access timestamps for recalled entries.
+
+        This is a non-critical operation - failure to update timestamps
+        should not prevent recall results from being returned.
+        """
+        try:
+            now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+            with self._write_transaction() as conn:
+                placeholders = ",".join("?" * len(entry_ids))
+                conn.execute(
+                    f"""
+                    UPDATE context_entries
+                    SET accessed_at = ?, access_count = access_count + 1
+                    WHERE id IN ({placeholders})
+                    """,
+                    [now, *entry_ids],
+                )
+        except Exception:
+            logger.warning("Failed to update access timestamps", exc_info=True)
 
     def fts_search(
         self,
@@ -1686,8 +1729,28 @@ class ContextStore:
 
         return False
 
+    def checkpoint_wal(self) -> None:
+        """Checkpoint the WAL file to compact the database.
+
+        Should be called during graceful shutdown to ensure all WAL data
+        is flushed to the main database file. Uses PASSIVE mode which does
+        not block other readers.
+        """
+        try:
+            conn = self._get_connection()
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            logger.info("WAL checkpoint completed")
+        except Exception:
+            logger.warning("Failed to checkpoint WAL", exc_info=True)
+
     def close(self) -> None:
-        """Close all database connections."""
+        """Close the current thread's database connection.
+
+        Attempts to checkpoint the WAL before closing for clean shutdown.
+        """
         if hasattr(self._local, "conn") and self._local.conn is not None:
-            self._local.conn.close()
+            with contextlib.suppress(Exception):
+                self._local.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            with contextlib.suppress(Exception):
+                self._local.conn.close()
             self._local.conn = None

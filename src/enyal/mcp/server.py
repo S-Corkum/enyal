@@ -1,40 +1,139 @@
 """MCP server implementation for Enyal."""
 
+import atexit
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+from enyal.core.process_lock import ProcessLock
 from enyal.core.retrieval import RetrievalEngine
 from enyal.core.store import ContextStore
 from enyal.models.context import ContextType, EdgeType, ScopeLevel
 
 logger = logging.getLogger(__name__)
 
-# Initialize MCP server
-mcp = FastMCP(
-    name="enyal",
-)
-
-# Global store instance (initialized lazily)
+# Global store instance (initialized lazily, eagerly via lifespan when possible)
 _store: ContextStore | None = None
 _retrieval: RetrievalEngine | None = None
+_process_lock: ProcessLock | None = None
+
+
+def _create_store() -> ContextStore:
+    """Create a new ContextStore instance from environment configuration."""
+    from enyal.embeddings.engine import EmbeddingEngine
+    from enyal.embeddings.models import ModelConfig
+
+    db_path = os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
+    config = ModelConfig.from_env()
+    engine = EmbeddingEngine(config)
+    store = ContextStore(db_path, engine=engine)
+    logger.info(f"Initialized context store at: {db_path} (model: {config.name})")
+    return store
+
+
+def _verify_startup_health(store: ContextStore) -> None:
+    """Verify the store is functional on startup.
+
+    Runs a minimal health check to ensure the database is accessible,
+    sqlite-vec is loaded, and the store can serve queries.
+    """
+    try:
+        stats = store.stats()
+        logger.info(
+            f"Startup health check passed: {stats.active_entries} entries, "
+            f"{stats.total_edges} edges"
+        )
+    except Exception:
+        logger.exception("Startup health check failed")
+        raise
+
+
+def _cleanup() -> None:
+    """Cleanup handler for graceful shutdown."""
+    global _store, _retrieval, _process_lock
+    if _store is not None:
+        try:
+            _store.checkpoint_wal()
+        except Exception:
+            logger.warning("Failed to checkpoint WAL on shutdown", exc_info=True)
+        try:
+            _store.close()
+        except Exception:
+            logger.warning("Failed to close store on shutdown", exc_info=True)
+        _store = None
+        _retrieval = None
+    if _process_lock is not None:
+        _process_lock.release()
+        _process_lock = None
+
+
+@asynccontextmanager
+async def app_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ignore[type-arg]
+    """Manage server lifecycle: initialization and cleanup.
+
+    Startup:
+        - Acquire process lock to prevent duplicate instances
+        - Initialize store and retrieval engine eagerly
+        - Run startup health check
+
+    Shutdown:
+        - Checkpoint WAL for clean database state
+        - Close database connections
+        - Release process lock
+    """
+    global _store, _retrieval, _process_lock
+
+    # 1. Acquire process lock
+    db_path = Path(os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")).expanduser()
+    _process_lock = ProcessLock(db_path)
+    if not _process_lock.acquire():
+        logger.warning(
+            "Could not acquire process lock. Another Enyal instance may be running. "
+            "Proceeding anyway, but concurrent access may cause issues."
+        )
+
+    # 2. Initialize store and retrieval eagerly
+    try:
+        _store = _create_store()
+        _retrieval = RetrievalEngine(_store)
+        _verify_startup_health(_store)
+    except Exception:
+        logger.exception("Failed to initialize Enyal server during lifespan startup")
+        # Don't hard-fail - tools will return individual errors
+
+    # 3. Register atexit as backup cleanup (in case lifespan shutdown doesn't run)
+    atexit.register(_cleanup)
+
+    yield {}
+
+    # 4. Cleanup (unregister atexit first to avoid double cleanup)
+    atexit.unregister(_cleanup)
+    _cleanup()
+    logger.info("Enyal server shutdown complete")
+
+
+# Initialize MCP server with lifespan management
+mcp = FastMCP(
+    name="enyal",
+    lifespan=app_lifespan,
+)
 
 
 def get_store() -> ContextStore:
-    """Get or create the context store instance."""
+    """Get or create the context store instance.
+
+    Prefers the instance initialized by the lifespan. Falls back to
+    lazy initialization if lifespan hasn't run yet (e.g., during testing).
+    """
     global _store
     if _store is None:
-        from enyal.embeddings.engine import EmbeddingEngine
-        from enyal.embeddings.models import ModelConfig
-
-        db_path = os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
-        config = ModelConfig.from_env()
-        engine = EmbeddingEngine(config)
-        _store = ContextStore(db_path, engine=engine)
-        logger.info(f"Initialized context store at: {db_path} (model: {config.name})")
+        _store = _create_store()
     return _store
 
 
@@ -315,9 +414,8 @@ def enyal_remember(input: RememberInput) -> dict[str, Any]:
     - "merge": Combine tags and update confidence of the existing entry
     - "store": Store as a new entry regardless of similarity
     """
-    store = get_store()
-
     try:
+        store = get_store()
         result = store.remember(
             content=input.content,
             content_type=ContextType(input.content_type),
@@ -395,9 +493,8 @@ def enyal_recall(input: RecallInput) -> dict[str, Any]:
 
     Returns entries sorted by relevance with confidence scores.
     """
-    retrieval = get_retrieval()
-
     try:
+        retrieval = get_retrieval()
         results = retrieval.search(
             query=input.query,
             limit=input.limit,
@@ -462,9 +559,8 @@ def enyal_recall_by_scope(input: RecallByScopeInput) -> dict[str, Any]:
 
     Results from more specific scopes are weighted higher than general ones.
     """
-    retrieval = get_retrieval()
-
     try:
+        retrieval = get_retrieval()
         results = retrieval.search_by_scope(
             query=input.query,
             file_path=input.file_path,
@@ -520,9 +616,8 @@ def enyal_forget(input: ForgetInput) -> dict[str, Any]:
     Soft-deleted entries are excluded from search results but preserved
     for audit purposes.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         success = store.forget(input.entry_id, hard_delete=input.hard_delete)
         if success:
             action = "permanently deleted" if input.hard_delete else "deprecated"
@@ -555,9 +650,8 @@ def enyal_update(input: UpdateInput) -> dict[str, Any]:
 
     If content is updated, the embedding is automatically regenerated.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         success = store.update(
             entry_id=input.entry_id,
             content=input.content,
@@ -590,9 +684,8 @@ def enyal_stats() -> dict[str, Any]:
     Returns counts by scope, content type, confidence distribution,
     storage metrics, and date ranges.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         stats = store.stats()
         return {
             "success": True,
@@ -627,9 +720,8 @@ def enyal_get(entry_id: str) -> dict[str, Any]:
 
     Returns full details of the entry including all metadata and relationships.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         entry = store.get(entry_id)
         if entry:
             # Get edges for this entry
@@ -701,9 +793,8 @@ def enyal_link(input: LinkInput) -> dict[str, Any]:
     - depends_on: This entry requires another
     - conflicts_with: These entries contradict each other
     """
-    store = get_store()
-
     try:
+        store = get_store()
         edge_id = store.link(
             source_id=input.source_id,
             target_id=input.target_id,
@@ -737,9 +828,8 @@ def enyal_unlink(edge_id: str) -> dict[str, Any]:
 
     Use this to delete an edge that was created with enyal_link.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         success = store.unlink(edge_id)
         if success:
             return {"success": True, "message": f"Removed edge {edge_id}"}
@@ -758,9 +848,8 @@ def enyal_edges(input: EdgesInput) -> dict[str, Any]:
     Returns all edges connected to the specified entry, optionally
     filtered by direction and relationship type.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         edges = store.get_edges(
             entry_id=input.entry_id,
             direction=input.direction,
@@ -798,10 +887,9 @@ def enyal_traverse(input: TraverseInput) -> dict[str, Any]:
     Finds the starting entry via semantic search, then walks the graph
     following the specified relationship types up to max_depth levels.
     """
-    store = get_store()
-    retrieval = get_retrieval()
-
     try:
+        store = get_store()
+        retrieval = get_retrieval()
         # Find starting node via search
         search_results = retrieval.search(query=input.start_query, limit=1)
         if not search_results:
@@ -855,10 +943,9 @@ def enyal_impact(input: ImpactInput) -> dict[str, Any]:
     Finds all entries that depend on the specified entry (directly or
     transitively), helping you understand the impact of potential changes.
     """
-    store = get_store()
-    retrieval = get_retrieval()
-
     try:
+        store = get_store()
+        retrieval = get_retrieval()
         # Find target entry
         if input.entry_id:
             target = store.get(input.entry_id)
@@ -938,9 +1025,8 @@ def enyal_health() -> dict[str, Any]:
     - Never accessed entries
     - Overall health score (0-1)
     """
-    store = get_store()
-
     try:
+        store = get_store()
         health = store.health_check()
         return {
             "success": True,
@@ -1031,9 +1117,8 @@ def enyal_review(input: ReviewInput) -> dict[str, Any]:
     - orphan: Entries with no graph connections
     - conflicts: Entries with unresolved conflicts
     """
-    store = get_store()
-
     try:
+        store = get_store()
         result: dict[str, Any] = {"success": True}
 
         if input.category in ("all", "stale"):
@@ -1085,9 +1170,8 @@ def enyal_history(input: HistoryInput) -> dict[str, Any]:
     Shows how an entry has changed over time, including content changes,
     confidence updates, and tag modifications.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         history = store.get_history(input.entry_id, limit=input.limit)
         entry = store.get(input.entry_id)
 
@@ -1117,9 +1201,8 @@ def enyal_analytics(input: AnalyticsInput) -> dict[str, Any]:
     Shows which entries are most frequently recalled, how often
     entries are updated, and usage patterns over time.
     """
-    store = get_store()
-
     try:
+        store = get_store()
         analytics = store.get_analytics(
             entry_id=input.entry_id,
             event_type=input.event_type,
@@ -1140,13 +1223,28 @@ def main() -> None:
     """Run the MCP server."""
     import sys
 
-    # Configure logging
+    # Configure logging to stderr (captured by MCP transport)
     log_level = os.environ.get("ENYAL_LOG_LEVEL", "INFO")
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         stream=sys.stderr,
     )
+
+    # Also log to file for persistent diagnostics
+    db_dir = Path(os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")).expanduser().parent
+    db_dir.mkdir(parents=True, exist_ok=True)
+    log_file = db_dir / "enyal.log"
+    try:
+        file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
+        logger.info(f"Logging to file: {log_file}")
+    except Exception as e:
+        logger.warning(f"Could not set up file logging at {log_file}: {e}")
 
     # Configure SSL settings BEFORE any model loading
     # This is critical for corporate networks with SSL inspection
@@ -1169,14 +1267,16 @@ def main() -> None:
     if ssl_config.model_path:
         logger.info(f"SSL: Using local model: {ssl_config.model_path}")
 
-    # Optionally preload the embedding model
+    # Optionally preload the embedding model (lifespan handles initialization,
+    # but preloading forces model download before accepting requests)
     if os.environ.get("ENYAL_PRELOAD_MODEL", "").lower() == "true":
         store = get_store()
         logger.info("Preloading embedding model...")
         store._engine.preload()
         logger.info("Embedding model preloaded")
 
-    # Run the server
+    # Run the server (lifespan handles startup/shutdown)
+    logger.info("Starting Enyal MCP server...")
     mcp.run(transport="stdio")
 
 
