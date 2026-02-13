@@ -14,8 +14,10 @@ from enyal.core.ssl_config import (
     check_ssl_health,
     configure_http_backend,
     configure_ssl_environment,
+    download_model,
     get_model_path,
     get_ssl_config,
+    verify_model,
 )
 
 
@@ -329,3 +331,128 @@ class TestFindSystemCABundle:
         ):
             bundle = _find_system_ca_bundle()
             assert bundle is None
+
+
+class TestDownloadModel:
+    """Tests for download_model function."""
+
+    def test_download_model_offline_mode_raises(self) -> None:
+        """Test that download raises in offline mode."""
+        with patch.dict(os.environ, {"ENYAL_OFFLINE_MODE": "true"}, clear=False):
+            with pytest.raises(RuntimeError, match="Cannot download model in offline mode"):
+                download_model()
+
+    def test_download_model_success(self) -> None:
+        """Test successful model download."""
+        mock_model = MagicMock()
+        mock_model._model_card_vars = {"model_path": "/cached/model/path"}
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("sentence_transformers.SentenceTransformer", return_value=mock_model),
+        ):
+            mock_config.return_value = SSLConfig(offline_mode=False)
+
+            result = download_model("test-model", cache_dir="/tmp/cache")
+
+            assert result == "/cached/model/path"
+
+
+class TestVerifyModel:
+    """Tests for verify_model function."""
+
+    def test_verify_model_success(self) -> None:
+        """Test successful model verification."""
+        mock_model = MagicMock()
+        import numpy as np
+        mock_model.encode.return_value = np.zeros(384, dtype=np.float32)
+
+        with (
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("enyal.core.ssl_config.get_model_path", return_value="test-model"),
+            patch("sentence_transformers.SentenceTransformer", return_value=mock_model),
+        ):
+            mock_config.return_value = SSLConfig()
+
+            result = verify_model()
+
+            assert result is True
+
+    def test_verify_model_failure(self) -> None:
+        """Test model verification failure."""
+        with (
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("enyal.core.ssl_config.get_model_path", return_value="test-model"),
+            patch("sentence_transformers.SentenceTransformer", side_effect=Exception("Load failed")),
+        ):
+            mock_config.return_value = SSLConfig()
+
+            result = verify_model()
+
+            assert result is False
+
+    def test_verify_model_custom_path(self) -> None:
+        """Test verification with custom model path."""
+        mock_model = MagicMock()
+        import numpy as np
+        mock_model.encode.return_value = np.zeros(384, dtype=np.float32)
+
+        with (
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("sentence_transformers.SentenceTransformer", return_value=mock_model),
+        ):
+            mock_config.return_value = SSLConfig()
+
+            result = verify_model("/custom/model/path")
+
+            assert result is True
+
+
+class TestGetModelPathOffline:
+    """Additional tests for get_model_path offline mode."""
+
+    def test_offline_mode_cached_model_exists(self) -> None:
+        """Test offline mode with cached model."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create the expected cache structure
+            model_dir = os.path.join(tmpdir, "hub", "models--sentence-transformers--test-model")
+            os.makedirs(model_dir)
+
+            with patch.dict(
+                os.environ,
+                {"ENYAL_OFFLINE_MODE": "true", "HF_HOME": tmpdir},
+                clear=False,
+            ):
+                # Need to clear any cached env vars
+                result = get_model_path("test-model")
+                assert result == "test-model"
+
+    def test_offline_mode_no_cached_model(self) -> None:
+        """Test offline mode without cached model raises."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(
+                os.environ,
+                {"ENYAL_OFFLINE_MODE": "true", "HF_HOME": tmpdir},
+                clear=False,
+            ):
+                with pytest.raises(RuntimeError, match="not cached"):
+                    get_model_path("nonexistent-model")
+
+
+class TestCheckSSLHealthLibraries:
+    """Tests for check_ssl_health library version detection."""
+
+    def test_health_check_returns_library_versions(self) -> None:
+        """Test health check includes library version info."""
+        status = check_ssl_health()
+        assert "huggingface_hub_version" in status
+        assert "sentence_transformers_version" in status

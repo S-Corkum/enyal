@@ -10,8 +10,12 @@ import pytest
 from enyal.cli.main import (
     cmd_forget,
     cmd_get,
+    cmd_model_download,
+    cmd_model_status,
+    cmd_model_verify,
     cmd_recall,
     cmd_remember,
+    cmd_serve,
     cmd_stats,
     get_store,
     main,
@@ -648,3 +652,345 @@ class TestMainEntrypoint:
             result = main()
 
             assert result == 0
+
+
+class TestCmdServe:
+    """Tests for cmd_serve function."""
+
+    def test_cmd_serve_basic(self) -> None:
+        """Test basic serve command."""
+        args = argparse.Namespace(
+            db=None,
+            preload=False,
+            log_level=None,
+            json=False,
+        )
+
+        with patch("enyal.cli.main.main") as mock_server_main:
+            # We need to patch the imported main from mcp.server
+            with patch.dict("sys.modules", {"enyal.mcp.server": MagicMock()}):
+                with patch("enyal.cli.main.main") as _:
+                    # Patch the import inside cmd_serve
+                    mock_module = MagicMock()
+                    with patch.dict("sys.modules", {"enyal.mcp": MagicMock(), "enyal.mcp.server": mock_module}):
+                        result = cmd_serve(args)
+
+                        assert result == 0
+
+    def test_cmd_serve_with_db(self) -> None:
+        """Test serve command with custom db path."""
+        args = argparse.Namespace(
+            db="/custom/db/path.db",
+            preload=False,
+            log_level=None,
+            json=False,
+        )
+
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"enyal.mcp": MagicMock(), "enyal.mcp.server": mock_module}):
+            result = cmd_serve(args)
+
+            assert result == 0
+            assert os.environ.get("ENYAL_DB_PATH") == "/custom/db/path.db"
+
+        # Cleanup
+        os.environ.pop("ENYAL_DB_PATH", None)
+
+    def test_cmd_serve_with_preload(self) -> None:
+        """Test serve command with preload."""
+        args = argparse.Namespace(
+            db=None,
+            preload=True,
+            log_level=None,
+            json=False,
+        )
+
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"enyal.mcp": MagicMock(), "enyal.mcp.server": mock_module}):
+            result = cmd_serve(args)
+
+            assert result == 0
+            assert os.environ.get("ENYAL_PRELOAD_MODEL") == "true"
+
+        # Cleanup
+        os.environ.pop("ENYAL_PRELOAD_MODEL", None)
+
+    def test_cmd_serve_with_log_level(self) -> None:
+        """Test serve command with custom log level."""
+        args = argparse.Namespace(
+            db=None,
+            preload=False,
+            log_level="DEBUG",
+            json=False,
+        )
+
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"enyal.mcp": MagicMock(), "enyal.mcp.server": mock_module}):
+            result = cmd_serve(args)
+
+            assert result == 0
+            assert os.environ.get("ENYAL_LOG_LEVEL") == "DEBUG"
+
+        # Cleanup
+        os.environ.pop("ENYAL_LOG_LEVEL", None)
+
+
+class TestCmdModelDownload:
+    """Tests for cmd_model_download function."""
+
+    def test_cmd_model_download_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test successful model download."""
+        args = argparse.Namespace(
+            model=None,
+            cache_dir=None,
+            db=None,
+            json=False,
+        )
+
+        with patch("enyal.core.ssl_config.download_model") as mock_download:
+            mock_download.return_value = "/path/to/model"
+
+            result = cmd_model_download(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "downloaded successfully" in captured.out
+
+    def test_cmd_model_download_custom_model(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model download with custom model name."""
+        args = argparse.Namespace(
+            model="custom-model-v2",
+            cache_dir="/custom/cache",
+            db=None,
+            json=False,
+        )
+
+        with patch("enyal.core.ssl_config.download_model") as mock_download:
+            mock_download.return_value = "/custom/cache/custom-model-v2"
+
+            result = cmd_model_download(args)
+
+            assert result == 0
+            mock_download.assert_called_once_with("custom-model-v2", cache_dir="/custom/cache")
+
+    def test_cmd_model_download_json_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model download with JSON output."""
+        args = argparse.Namespace(
+            model=None,
+            cache_dir=None,
+            db=None,
+            json=True,
+        )
+
+        with patch("enyal.core.ssl_config.download_model") as mock_download:
+            mock_download.return_value = "/path/to/model"
+
+            result = cmd_model_download(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            # cmd_model_download prints status lines before JSON; extract last line
+            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            output = json.loads(json_line)
+            assert output["success"] is True
+
+    def test_cmd_model_download_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model download with error."""
+        args = argparse.Namespace(
+            model=None,
+            cache_dir=None,
+            db=None,
+            json=False,
+        )
+
+        with patch("enyal.core.ssl_config.download_model") as mock_download:
+            mock_download.side_effect = Exception("SSL error")
+
+            result = cmd_model_download(args)
+
+            assert result == 1
+            captured = capsys.readouterr()
+            assert "Error downloading model" in captured.out
+
+    def test_cmd_model_download_error_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model download error with JSON output."""
+        args = argparse.Namespace(
+            model=None,
+            cache_dir=None,
+            db=None,
+            json=True,
+        )
+
+        with patch("enyal.core.ssl_config.download_model") as mock_download:
+            mock_download.side_effect = Exception("Network error")
+
+            result = cmd_model_download(args)
+
+            assert result == 1
+            captured = capsys.readouterr()
+            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            output = json.loads(json_line)
+            assert output["success"] is False
+
+
+class TestCmdModelVerify:
+    """Tests for cmd_model_verify function."""
+
+    def test_cmd_model_verify_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test successful model verification."""
+        args = argparse.Namespace(
+            model=None,
+            db=None,
+            json=False,
+        )
+
+        with patch("enyal.core.ssl_config.verify_model") as mock_verify:
+            mock_verify.return_value = True
+
+            result = cmd_model_verify(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "verification successful" in captured.out
+
+    def test_cmd_model_verify_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model verification failure."""
+        args = argparse.Namespace(
+            model="/bad/path",
+            db=None,
+            json=False,
+        )
+
+        with patch("enyal.core.ssl_config.verify_model") as mock_verify:
+            mock_verify.return_value = False
+
+            result = cmd_model_verify(args)
+
+            assert result == 1
+            captured = capsys.readouterr()
+            assert "verification failed" in captured.out
+
+    def test_cmd_model_verify_json_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model verification with JSON output."""
+        args = argparse.Namespace(
+            model=None,
+            db=None,
+            json=True,
+        )
+
+        with patch("enyal.core.ssl_config.verify_model") as mock_verify:
+            mock_verify.return_value = True
+
+            result = cmd_model_verify(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            output = json.loads(json_line)
+            assert output["success"] is True
+
+    def test_cmd_model_verify_json_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model verification failure with JSON output."""
+        args = argparse.Namespace(
+            model="some-model",
+            db=None,
+            json=True,
+        )
+
+        with patch("enyal.core.ssl_config.verify_model") as mock_verify:
+            mock_verify.return_value = False
+
+            result = cmd_model_verify(args)
+
+            assert result == 1
+            captured = capsys.readouterr()
+            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            output = json.loads(json_line)
+            assert output["success"] is False
+
+
+class TestCmdModelStatus:
+    """Tests for cmd_model_status function."""
+
+    def test_cmd_model_status_basic(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test basic model status output."""
+        args = argparse.Namespace(
+            db=None,
+            json=False,
+        )
+
+        status = {
+            "ssl_verify": True,
+            "cert_file": None,
+            "cert_file_exists": False,
+            "model_path": None,
+            "model_path_exists": False,
+            "offline_mode": False,
+            "hf_home": None,
+            "system_ca_bundle": "/etc/ssl/cert.pem",
+            "huggingface_hub_version": "0.20.0",
+            "sentence_transformers_version": "2.7.0",
+        }
+
+        with patch("enyal.core.ssl_config.check_ssl_health") as mock_health:
+            mock_health.return_value = status
+
+            result = cmd_model_status(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "SSL/Network Configuration" in captured.out
+            assert "Enabled" in captured.out
+
+    def test_cmd_model_status_with_cert(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model status with cert file configured."""
+        args = argparse.Namespace(
+            db=None,
+            json=False,
+        )
+
+        status = {
+            "ssl_verify": True,
+            "cert_file": "/path/to/cert.pem",
+            "cert_file_exists": True,
+            "model_path": "/path/to/model",
+            "model_path_exists": True,
+            "offline_mode": True,
+            "hf_home": "/custom/hf",
+            "system_ca_bundle": None,
+            "huggingface_hub_version": None,
+            "sentence_transformers_version": None,
+        }
+
+        with patch("enyal.core.ssl_config.check_ssl_health") as mock_health:
+            mock_health.return_value = status
+
+            result = cmd_model_status(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "/path/to/cert.pem" in captured.out
+            assert "Enabled" in captured.out  # offline mode
+
+    def test_cmd_model_status_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test model status with JSON output."""
+        args = argparse.Namespace(
+            db=None,
+            json=True,
+        )
+
+        status = {
+            "ssl_verify": True,
+            "cert_file": None,
+            "offline_mode": False,
+        }
+
+        with patch("enyal.core.ssl_config.check_ssl_health") as mock_health:
+            mock_health.return_value = status
+
+            result = cmd_model_status(args)
+
+            assert result == 0
+            captured = capsys.readouterr()
+            output = json.loads(captured.out)
+            assert output["ssl_verify"] is True
