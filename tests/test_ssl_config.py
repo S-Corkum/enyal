@@ -9,7 +9,13 @@ import pytest
 
 from enyal.core.ssl_config import (
     SSLConfig,
+    _convert_der_to_pem,
+    _count_pem_certs,
+    _ensure_combined_cert_bundle,
+    _ensure_pem_format,
     _find_system_ca_bundle,
+    _get_certifi_bundle,
+    _is_der_encoded,
     _parse_bool_env,
     check_ssl_health,
     configure_http_backend,
@@ -338,9 +344,11 @@ class TestDownloadModel:
 
     def test_download_model_offline_mode_raises(self) -> None:
         """Test that download raises in offline mode."""
-        with patch.dict(os.environ, {"ENYAL_OFFLINE_MODE": "true"}, clear=False):
-            with pytest.raises(RuntimeError, match="Cannot download model in offline mode"):
-                download_model()
+        with (
+            patch.dict(os.environ, {"ENYAL_OFFLINE_MODE": "true"}, clear=False),
+            pytest.raises(RuntimeError, match="Cannot download model in offline mode"),
+        ):
+            download_model()
 
     def test_download_model_success(self) -> None:
         """Test successful model download."""
@@ -438,14 +446,16 @@ class TestGetModelPathOffline:
 
     def test_offline_mode_no_cached_model(self) -> None:
         """Test offline mode without cached model raises."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict(
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(
                 os.environ,
                 {"ENYAL_OFFLINE_MODE": "true", "HF_HOME": tmpdir},
                 clear=False,
-            ):
-                with pytest.raises(RuntimeError, match="not cached"):
-                    get_model_path("nonexistent-model")
+            ),
+            pytest.raises(RuntimeError, match="not cached"),
+        ):
+            get_model_path("nonexistent-model")
 
 
 class TestCheckSSLHealthLibraries:
@@ -456,3 +466,240 @@ class TestCheckSSLHealthLibraries:
         status = check_ssl_health()
         assert "huggingface_hub_version" in status
         assert "sentence_transformers_version" in status
+
+
+class TestCountPemCerts:
+    """Tests for _count_pem_certs function."""
+
+    def test_counts_single_cert(self) -> None:
+        content = "-----BEGIN CERTIFICATE-----\ndata\n-----END CERTIFICATE-----\n"
+        assert _count_pem_certs(content) == 1
+
+    def test_counts_multiple_certs(self) -> None:
+        content = (
+            "-----BEGIN CERTIFICATE-----\ndata1\n-----END CERTIFICATE-----\n"
+            "-----BEGIN CERTIFICATE-----\ndata2\n-----END CERTIFICATE-----\n"
+            "-----BEGIN CERTIFICATE-----\ndata3\n-----END CERTIFICATE-----\n"
+        )
+        assert _count_pem_certs(content) == 3
+
+    def test_counts_zero_for_empty(self) -> None:
+        assert _count_pem_certs("") == 0
+
+    def test_counts_zero_for_non_pem(self) -> None:
+        assert _count_pem_certs("not a certificate") == 0
+
+
+class TestGetCertifiBundle:
+    """Tests for _get_certifi_bundle function."""
+
+    def test_returns_path_when_certifi_installed(self) -> None:
+        """certifi should be installed in test environment."""
+        result = _get_certifi_bundle()
+        assert result is not None
+        assert os.path.isfile(result)
+
+    def test_returns_none_when_certifi_missing(self) -> None:
+        with patch.dict("sys.modules", {"certifi": None}):
+            # Reload to clear any cached import
+            import importlib
+
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            result = mod._get_certifi_bundle()
+            assert result is None
+            # Reload again to restore
+            importlib.reload(mod)
+
+
+class TestEnsureCombinedCertBundle:
+    """Tests for _ensure_combined_cert_bundle function."""
+
+    def _write_pem(self, path: str, count: int) -> None:
+        """Write a fake PEM file with the given number of certs."""
+        content = ""
+        for i in range(count):
+            content += f"-----BEGIN CERTIFICATE-----\nfake-cert-data-{i}\n-----END CERTIFICATE-----\n"
+        with open(path, "w") as f:
+            f.write(content)
+
+    def test_returns_original_for_large_bundle(self) -> None:
+        """File with 5+ certs is treated as a complete bundle."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
+            self._write_pem(f.name, 10)
+            result = _ensure_combined_cert_bundle(f.name)
+            assert result == f.name
+            os.unlink(f.name)
+
+    def test_returns_original_for_zero_certs(self) -> None:
+        """File with no PEM certs returns original."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
+            f.write("not a certificate")
+            f.flush()
+            result = _ensure_combined_cert_bundle(f.name)
+            assert result == f.name
+            os.unlink(f.name)
+
+    def test_combines_small_cert_with_certifi(self) -> None:
+        """A file with 1 cert gets combined with certifi."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "corp.pem")
+            self._write_pem(cert_path, 1)
+
+            db_path = os.path.join(tmpdir, "data", "context.db")
+            os.makedirs(os.path.dirname(db_path))
+
+            with patch.dict(os.environ, {"ENYAL_DB_PATH": db_path}):
+                result = _ensure_combined_cert_bundle(cert_path)
+
+            # Should create a combined file (if certifi is available)
+            certifi_path = _get_certifi_bundle()
+            if certifi_path:
+                assert result != cert_path
+                assert os.path.isfile(result)
+                with open(result) as f:
+                    combined_content = f.read()
+                # Combined file should have corp cert + certifi certs
+                assert _count_pem_certs(combined_content) > 1
+                assert "Corporate CA certificate(s)" in combined_content
+            else:
+                # Without certifi, falls back to original
+                assert result == cert_path
+
+    def test_caches_combined_bundle(self) -> None:
+        """Combined bundle is cached and reused on subsequent calls."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "corp.pem")
+            self._write_pem(cert_path, 1)
+
+            db_path = os.path.join(tmpdir, "data", "context.db")
+            os.makedirs(os.path.dirname(db_path))
+
+            with patch.dict(os.environ, {"ENYAL_DB_PATH": db_path}):
+                result1 = _ensure_combined_cert_bundle(cert_path)
+                result2 = _ensure_combined_cert_bundle(cert_path)
+
+            assert result1 == result2
+
+    def test_regenerates_when_cert_changes(self) -> None:
+        """Combined bundle is regenerated when source cert changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "corp.pem")
+            self._write_pem(cert_path, 1)
+
+            db_path = os.path.join(tmpdir, "data", "context.db")
+            os.makedirs(os.path.dirname(db_path))
+
+            with patch.dict(os.environ, {"ENYAL_DB_PATH": db_path}):
+                result1 = _ensure_combined_cert_bundle(cert_path)
+
+                # Change the cert file content
+                self._write_pem(cert_path, 2)
+                result2 = _ensure_combined_cert_bundle(cert_path)
+
+            # Path should be the same (same location), but content differs
+            if _get_certifi_bundle():
+                assert result1 == result2  # same file path
+                with open(result2) as f:
+                    content = f.read()
+                # Should contain the 2 new certs
+                assert "fake-cert-data-0" in content
+                assert "fake-cert-data-1" in content
+
+    def test_returns_original_for_unreadable_file(self) -> None:
+        """Returns original when file can't be read."""
+        result = _ensure_combined_cert_bundle("/nonexistent/cert.pem")
+        assert result == "/nonexistent/cert.pem"
+
+
+class TestConfigureSSLEnvironmentCombined:
+    """Tests for configure_ssl_environment with auto-combine."""
+
+    def test_auto_combines_small_cert(self) -> None:
+        """Verifies that a small cert file triggers auto-combine."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "corp.pem")
+            with open(cert_path, "w") as f:
+                f.write("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+
+            db_path = os.path.join(tmpdir, "data", "context.db")
+            os.makedirs(os.path.dirname(db_path))
+
+            config = SSLConfig(cert_file=cert_path)
+            with patch.dict(os.environ, {"ENYAL_DB_PATH": db_path}, clear=False):
+                configure_ssl_environment(config)
+
+                # After configure_ssl_environment, cert_file should be updated
+                # to the combined path (if certifi available)
+                certifi_path = _get_certifi_bundle()
+                if certifi_path:
+                    assert config.cert_file != cert_path
+                    assert "combined_ca_bundle.pem" in config.cert_file
+                    assert os.environ["REQUESTS_CA_BUNDLE"] == config.cert_file
+                else:
+                    assert config.cert_file == cert_path
+
+
+class TestDerEncoding:
+    """Tests for DER certificate detection and conversion."""
+
+    def test_is_der_encoded_with_pem(self) -> None:
+        """PEM files should not be detected as DER."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
+            f.write("-----BEGIN CERTIFICATE-----\nfakedata\n-----END CERTIFICATE-----\n")
+            f.flush()
+            assert _is_der_encoded(f.name) is False
+            os.unlink(f.name)
+
+    def test_is_der_encoded_with_der(self) -> None:
+        """DER files start with 0x30 (ASN.1 SEQUENCE)."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".crt", delete=False) as f:
+            # 0x30 0x82 is a typical DER certificate header
+            f.write(b"\x30\x82\x03\x00" + b"\x00" * 100)
+            f.flush()
+            assert _is_der_encoded(f.name) is True
+            os.unlink(f.name)
+
+    def test_is_der_encoded_with_empty_file(self) -> None:
+        """Empty file should not be detected as DER."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".crt", delete=False) as f:
+            f.flush()
+            assert _is_der_encoded(f.name) is False
+            os.unlink(f.name)
+
+    def test_is_der_encoded_nonexistent(self) -> None:
+        """Nonexistent file returns False."""
+        assert _is_der_encoded("/nonexistent/file.crt") is False
+
+    def test_convert_der_to_pem_invalid_data(self) -> None:
+        """Invalid DER data should return None."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".crt", delete=False) as f:
+            f.write(b"\x30\x82\x03\x00" + b"\x00" * 100)
+            f.flush()
+            result = _convert_der_to_pem(f.name)
+            assert result is None
+            os.unlink(f.name)
+
+    def test_ensure_pem_format_already_pem(self) -> None:
+        """PEM file passes through unchanged."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
+            f.write("-----BEGIN CERTIFICATE-----\nfakedata\n-----END CERTIFICATE-----\n")
+            f.flush()
+            result = _ensure_pem_format(f.name)
+            assert result == f.name
+            os.unlink(f.name)
+
+    def test_ensure_pem_format_nonexistent(self) -> None:
+        """Nonexistent file passes through."""
+        result = _ensure_pem_format("/nonexistent/cert.crt")
+        assert result == "/nonexistent/cert.crt"
+
+    def test_ensure_pem_format_non_der_binary(self) -> None:
+        """Binary file that isn't DER passes through."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".crt", delete=False) as f:
+            f.write(b"\x00\x01\x02\x03")  # Not 0x30, so not DER
+            f.flush()
+            result = _ensure_pem_format(f.name)
+            assert result == f.name
+            os.unlink(f.name)

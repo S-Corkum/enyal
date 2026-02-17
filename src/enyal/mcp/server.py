@@ -74,7 +74,7 @@ def _cleanup() -> None:
 
 
 @asynccontextmanager
-async def app_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ignore[type-arg]
+async def app_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifecycle: initialization and cleanup.
 
     Startup:
@@ -1257,6 +1257,11 @@ def main() -> None:
     ssl_config = get_ssl_config()
     configure_ssl_environment(ssl_config)
     configure_http_backend(ssl_config)
+
+    # Mark SSL as configured so the embedding engine doesn't reconfigure redundantly
+    import enyal.embeddings.engine as _engine_module
+
+    _engine_module._ssl_configured = True
 
     if ssl_config.cert_file:
         logger.info(f"SSL: Using CA bundle: {ssl_config.cert_file}")

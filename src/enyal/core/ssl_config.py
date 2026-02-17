@@ -5,7 +5,10 @@ with SSL inspection (e.g., Zscaler, BlueCoat, corporate proxies) that inject
 enterprise CA certificates into the SSL chain.
 
 Environment Variables:
-    ENYAL_SSL_CERT_FILE: Path to corporate CA bundle file
+    ENYAL_SSL_CERT_FILE: Path to corporate CA certificate or bundle file.
+        If this contains only the corporate CA cert(s), it will be automatically
+        combined with the standard CA bundle (via certifi) so that both corporate
+        and public HTTPS connections work correctly.
     ENYAL_SSL_VERIFY: Enable/disable SSL verification (default: "true")
     ENYAL_MODEL_PATH: Local path to pre-downloaded model
     ENYAL_OFFLINE_MODE: Force offline-only operation (default: "false")
@@ -22,6 +25,7 @@ Security Notes:
     - Use ENYAL_OFFLINE_MODE with pre-downloaded models for air-gapped environments
 """
 
+import hashlib
 import logging
 import os
 import platform
@@ -88,6 +92,226 @@ def _find_system_ca_bundle() -> str | None:
     return None
 
 
+def _count_pem_certs(content: str) -> int:
+    """Count the number of PEM certificates in a string."""
+    return content.count("-----BEGIN CERTIFICATE-----")
+
+
+def _is_der_encoded(file_path: str) -> bool:
+    """Check if a certificate file is DER-encoded (binary) rather than PEM.
+
+    DER files are binary and won't contain PEM text markers. Common extensions
+    are .crt, .cer, .der. This checks the actual content, not the extension.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(2)
+        # DER-encoded certificates start with 0x30 (ASN.1 SEQUENCE tag)
+        return len(header) >= 2 and header[0] == 0x30
+    except OSError:
+        return False
+
+
+def _convert_der_to_pem(der_path: str) -> str | None:
+    """Convert a DER-encoded certificate to PEM format.
+
+    Args:
+        der_path: Path to DER-encoded certificate file.
+
+    Returns:
+        PEM-encoded certificate string, or None if conversion fails.
+    """
+    import ssl
+
+    try:
+        with open(der_path, "rb") as f:
+            der_data = f.read()
+
+        # Validate and convert using ssl module
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(cadata=ssl.DER_cert_to_PEM_cert(der_data))
+
+        return ssl.DER_cert_to_PEM_cert(der_data)
+    except Exception as e:
+        logger.debug(f"DER-to-PEM conversion failed for {der_path}: {e}")
+        return None
+
+
+def _ensure_pem_format(cert_file: str) -> str:
+    """Ensure a certificate file is in PEM format.
+
+    If the file is DER-encoded (.crt, .cer, .der), convert it to PEM and
+    write it alongside the original file.
+
+    Args:
+        cert_file: Path to certificate file (PEM or DER).
+
+    Returns:
+        Path to a PEM-format certificate file.
+    """
+    # Quick check: does it already have PEM content?
+    try:
+        with open(cert_file, errors="replace") as f:
+            content = f.read(100)
+        if "-----BEGIN" in content:
+            return cert_file
+    except OSError:
+        return cert_file
+
+    # Check if it's DER-encoded
+    if not _is_der_encoded(cert_file):
+        return cert_file
+
+    logger.info(f"Detected DER-encoded certificate: {cert_file}")
+
+    pem_content = _convert_der_to_pem(cert_file)
+    if pem_content is None:
+        logger.warning(
+            f"Could not convert DER certificate to PEM: {cert_file}. "
+            "If this is a .crt file, it may need to be in PEM format. "
+            "Convert with: openssl x509 -inform DER -in cert.crt -out cert.pem"
+        )
+        return cert_file
+
+    # Write PEM version next to original
+    pem_path = Path(cert_file).with_suffix(".pem")
+
+    # If .pem already exists, use enyal data dir instead
+    if pem_path.exists() and str(pem_path) != cert_file:
+        enyal_dir = Path(
+            os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
+        ).expanduser().parent
+        enyal_dir.mkdir(parents=True, exist_ok=True)
+        pem_path = enyal_dir / f"converted_{Path(cert_file).stem}.pem"
+
+    try:
+        pem_path.write_text(pem_content)
+        logger.info(f"Converted DER to PEM: {cert_file} -> {pem_path}")
+        return str(pem_path)
+    except OSError as e:
+        logger.warning(f"Could not write PEM file {pem_path}: {e}")
+        return cert_file
+
+
+def _get_certifi_bundle() -> str | None:
+    """Get the certifi CA bundle path, if available."""
+    try:
+        import certifi
+
+        path = certifi.where()
+        if os.path.isfile(path):
+            return path
+    except ImportError:
+        pass
+    return None
+
+
+def _ensure_combined_cert_bundle(cert_file: str) -> str:
+    """Ensure the cert file includes standard CA roots for full HTTPS coverage.
+
+    Corporate environments with SSL inspection typically provide only the
+    corporate CA certificate. When this is used as the sole trust store
+    (via REQUESTS_CA_BUNDLE), connections to non-proxied endpoints (CDNs,
+    model download mirrors) will fail because the standard root CAs are missing.
+
+    This function detects small cert files (fewer than 5 certificates) and
+    automatically combines them with the certifi CA bundle, writing the result
+    to ~/.enyal/combined_ca_bundle.pem. The combined bundle is cached and only
+    regenerated when the source cert file changes.
+
+    Args:
+        cert_file: Path to the user's certificate file.
+
+    Returns:
+        Path to the combined bundle, or the original cert_file if combining
+        is not needed or not possible.
+    """
+    try:
+        with open(cert_file, errors="replace") as f:
+            user_cert_content = f.read()
+    except OSError as e:
+        logger.warning(f"Cannot read cert file {cert_file}: {e}")
+        return cert_file
+
+    user_cert_count = _count_pem_certs(user_cert_content)
+
+    # If the file already has many certs, it's likely a complete bundle
+    if user_cert_count >= 5:
+        logger.debug(
+            f"Cert file has {user_cert_count} certificates, "
+            "treating as complete bundle"
+        )
+        return cert_file
+
+    if user_cert_count == 0:
+        logger.warning(f"Cert file contains no PEM certificates: {cert_file}")
+        return cert_file
+
+    # Try to get certifi bundle for combining
+    certifi_path = _get_certifi_bundle()
+    if certifi_path is None:
+        # Try system CA bundle as fallback
+        certifi_path = _find_system_ca_bundle()
+
+    if certifi_path is None:
+        logger.warning(
+            f"Cert file has only {user_cert_count} certificate(s) but no "
+            "standard CA bundle found (certifi not installed, no system bundle). "
+            "HTTPS connections to non-corporate endpoints may fail."
+        )
+        return cert_file
+
+    # Compute hash of user cert to detect changes
+    cert_hash = hashlib.sha256(user_cert_content.encode()).hexdigest()[:12]
+
+    # Write combined bundle to enyal data directory
+    enyal_dir = Path(
+        os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
+    ).expanduser().parent
+    enyal_dir.mkdir(parents=True, exist_ok=True)
+
+    combined_path = enyal_dir / "combined_ca_bundle.pem"
+    hash_path = enyal_dir / "combined_ca_bundle.hash"
+
+    # Check if cached bundle is still valid
+    if combined_path.exists() and hash_path.exists():
+        try:
+            cached_hash = hash_path.read_text().strip()
+            if cached_hash == cert_hash:
+                logger.debug("Using cached combined CA bundle")
+                return str(combined_path)
+        except OSError:
+            pass
+
+    # Build combined bundle: certifi roots + user's corporate cert(s)
+    try:
+        with open(certifi_path, errors="replace") as f:
+            base_bundle = f.read()
+
+        base_cert_count = _count_pem_certs(base_bundle)
+
+        # Ensure newline separation between bundles
+        if not base_bundle.endswith("\n"):
+            base_bundle += "\n"
+
+        combined = base_bundle + "\n# Corporate CA certificate(s)\n" + user_cert_content
+
+        combined_path.write_text(combined)
+        hash_path.write_text(cert_hash)
+
+        combined_cert_count = _count_pem_certs(combined)
+        logger.info(
+            f"Created combined CA bundle: {combined_path} "
+            f"({base_cert_count} standard + {user_cert_count} corporate = "
+            f"{combined_cert_count} total certificates)"
+        )
+        return str(combined_path)
+
+    except OSError as e:
+        logger.warning(f"Failed to create combined CA bundle: {e}")
+        return cert_file
+
+
 def get_ssl_config() -> SSLConfig:
     """
     Get SSL configuration from environment variables.
@@ -110,6 +334,8 @@ def get_ssl_config() -> SSLConfig:
         or os.environ.get("REQUESTS_CA_BUNDLE")
         or os.environ.get("SSL_CERT_FILE")
     )
+    if cert_file:
+        cert_file = os.path.expanduser(cert_file)
 
     # Parse SSL verification setting
     verify = _parse_bool_env("ENYAL_SSL_VERIFY", default=True)
@@ -173,7 +399,25 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
             logger.error(f"CA bundle file not found: {config.cert_file}")
             raise FileNotFoundError(f"CA bundle file not found: {config.cert_file}")
 
-        logger.info(f"Using CA bundle: {config.cert_file}")
+        # Handle DER-encoded (.crt, .cer, .der) certificates by converting to PEM.
+        # requests and urllib3 require PEM format.
+        config.cert_file = _ensure_pem_format(config.cert_file)
+
+        # Auto-combine with standard CA roots if the cert file appears incomplete.
+        # This handles the common case where users provide only their corporate CA
+        # cert, which would break connections to non-proxied endpoints.
+        effective_cert = _ensure_combined_cert_bundle(config.cert_file)
+        if effective_cert != config.cert_file:
+            logger.info(
+                f"Using combined CA bundle: {effective_cert} "
+                f"(original: {config.cert_file})"
+            )
+            # Update config so downstream consumers (configure_http_backend) also
+            # use the combined bundle
+            config.cert_file = effective_cert
+        else:
+            logger.info(f"Using CA bundle: {config.cert_file}")
+
         os.environ["REQUESTS_CA_BUNDLE"] = config.cert_file
         os.environ["SSL_CERT_FILE"] = config.cert_file
         os.environ["CURL_CA_BUNDLE"] = config.cert_file
@@ -230,7 +474,14 @@ def configure_http_backend(config: SSLConfig | None = None) -> None:
         return session
 
     hf_configure_http_backend(backend_factory=create_session)
-    logger.debug("Configured huggingface_hub HTTP backend with custom SSL settings")
+    if config.cert_file:
+        logger.debug(
+            f"Configured huggingface_hub HTTP backend with cert: {config.cert_file}"
+        )
+    elif not config.verify:
+        logger.debug("Configured huggingface_hub HTTP backend with SSL verify=False")
+    else:
+        logger.debug("Configured huggingface_hub HTTP backend with system defaults")
 
 
 def get_model_path(default_name: str = "all-MiniLM-L6-v2") -> str:
