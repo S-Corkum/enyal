@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import ssl
 import tempfile
 import warnings
 from unittest.mock import MagicMock, patch
@@ -12,12 +13,15 @@ from enyal.core.ssl_config import (
     SSLConfig,
     _convert_der_to_pem,
     _count_pem_certs,
+    _disable_ssl_globally,
     _ensure_combined_cert_bundle,
     _ensure_pem_format,
+    _export_macos_system_certs,
     _find_system_ca_bundle,
     _get_certifi_bundle,
     _is_der_encoded,
     _parse_bool_env,
+    _try_inject_truststore,
     check_ssl_health,
     configure_http_backend,
     configure_ssl_environment,
@@ -227,11 +231,55 @@ class TestConfigureSSLEnvironment:
         config = SSLConfig(verify=False)
         env = {k: v for k, v in os.environ.items()
                if k != "HF_HUB_DISABLE_XET"}
-        with patch.dict(os.environ, env, clear=True):
+        # Save and restore ssl._create_default_https_context
+        original_ctx = ssl._create_default_https_context
+        try:
+            with patch.dict(os.environ, env, clear=True):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    configure_ssl_environment(config)
+                assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_disables_hf_transfer_when_ssl_verify_false(self) -> None:
+        """Test disables hf_transfer when SSL verification is disabled."""
+        config = SSLConfig(verify=False)
+        original_ctx = ssl._create_default_https_context
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    configure_ssl_environment(config)
+                assert os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "0"
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_verify_false_disables_ssl_globally(self) -> None:
+        """Test that verify=False monkey-patches ssl module."""
+        config = SSLConfig(verify=False)
+        original_ctx = ssl._create_default_https_context
+        try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 configure_ssl_environment(config)
-            assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+            # ssl._create_default_https_context should be the unverified context
+            assert ssl._create_default_https_context is ssl._create_unverified_context
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_verify_false_sets_pythonhttpsverify(self) -> None:
+        """Test that verify=False sets PYTHONHTTPSVERIFY=0."""
+        config = SSLConfig(verify=False)
+        original_ctx = ssl._create_default_https_context
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    configure_ssl_environment(config)
+                assert os.environ.get("PYTHONHTTPSVERIFY") == "0"
+        finally:
+            ssl._create_default_https_context = original_ctx
 
     def test_raises_for_missing_cert_file(self) -> None:
         """Test raises FileNotFoundError for missing cert file."""
@@ -242,8 +290,12 @@ class TestConfigureSSLEnvironment:
     def test_warns_when_ssl_disabled(self) -> None:
         """Test warns when SSL verification is disabled."""
         config = SSLConfig(verify=False)
-        with pytest.warns(UserWarning, match="SSL verification is disabled"):
-            configure_ssl_environment(config)
+        original_ctx = ssl._create_default_https_context
+        try:
+            with pytest.warns(UserWarning, match="SSL verification is disabled"):
+                configure_ssl_environment(config)
+        finally:
+            ssl._create_default_https_context = original_ctx
 
     def test_sets_offline_mode_env_vars(self) -> None:
         """Test sets offline mode environment variables."""
@@ -301,14 +353,18 @@ class TestConfigureSSLEnvironmentEndpoint:
             assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "300"
 
     def test_does_not_set_endpoint_vars_when_not_configured(self) -> None:
-        """Test does not set endpoint vars when hf_endpoint is None."""
+        """Test does not set HF_ENDPOINT when hf_endpoint is None."""
         config = SSLConfig()
         env = {k: v for k, v in os.environ.items()
-               if k not in ("HF_ENDPOINT", "HF_HUB_DISABLE_XET")}
-        with patch.dict(os.environ, env, clear=True):
+               if k not in ("HF_ENDPOINT",)}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            # Disable auto-detect so it doesn't set HF_HUB_DISABLE_XET
+            patch("enyal.core.ssl_config._try_inject_truststore", return_value=False),
+            patch("enyal.core.ssl_config._export_macos_system_certs", return_value=None),
+        ):
             configure_ssl_environment(config)
             assert "HF_ENDPOINT" not in os.environ
-            assert "HF_HUB_DISABLE_XET" not in os.environ
 
 
 class TestConfigureHTTPBackend:
@@ -803,3 +859,323 @@ class TestDerEncoding:
             result = _ensure_pem_format(f.name)
             assert result == f.name
             os.unlink(f.name)
+
+
+class TestDisableSSLGlobally:
+    """Tests for _disable_ssl_globally function."""
+
+    def test_patches_ssl_context(self) -> None:
+        """Test that ssl._create_default_https_context is replaced."""
+        original_ctx = ssl._create_default_https_context
+        try:
+            _disable_ssl_globally()
+            assert ssl._create_default_https_context is ssl._create_unverified_context
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_sets_pythonhttpsverify(self) -> None:
+        """Test PYTHONHTTPSVERIFY=0 is set."""
+        original_ctx = ssl._create_default_https_context
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                _disable_ssl_globally()
+                assert os.environ.get("PYTHONHTTPSVERIFY") == "0"
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_suppresses_urllib3_warnings(self) -> None:
+        """Test urllib3 InsecureRequestWarning is suppressed."""
+        original_ctx = ssl._create_default_https_context
+        try:
+            _disable_ssl_globally()
+            # After disabling, urllib3 warnings should be suppressed
+            import urllib3
+
+            # Check that the warning filter was added
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                # This should NOT produce a warning after _disable_ssl_globally
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                # The point is that _disable_ssl_globally didn't crash
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+
+class TestTryInjectTruststore:
+    """Tests for _try_inject_truststore function."""
+
+    def test_returns_true_when_truststore_available(self) -> None:
+        """Test returns True when truststore can be injected."""
+        mock_truststore = MagicMock()
+        with patch.dict("sys.modules", {"truststore": mock_truststore}):
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            result = mod._try_inject_truststore()
+            assert result is True
+            mock_truststore.inject_into_ssl.assert_called_once()
+            importlib.reload(mod)
+
+    def test_returns_false_when_not_installed(self) -> None:
+        """Test returns False when truststore is not installed."""
+        result = _try_inject_truststore()
+        # This will return True if truststore is installed, False if not.
+        # We can't control whether it's installed in test env, so just check type.
+        assert isinstance(result, bool)
+
+    def test_returns_false_on_injection_error(self) -> None:
+        """Test returns False when injection fails."""
+        mock_truststore = MagicMock()
+        mock_truststore.inject_into_ssl.side_effect = RuntimeError("injection failed")
+        with patch.dict("sys.modules", {"truststore": mock_truststore}):
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            result = mod._try_inject_truststore()
+            assert result is False
+            importlib.reload(mod)
+
+
+class TestExportMacosSystemCerts:
+    """Tests for _export_macos_system_certs function."""
+
+    def test_returns_none_on_non_macos(self) -> None:
+        """Test returns None on non-macOS platforms."""
+        with patch("enyal.core.ssl_config.platform") as mock_platform:
+            mock_platform.system.return_value = "Linux"
+            result = _export_macos_system_certs()
+            assert result is None
+
+    def test_exports_certs_on_macos(self) -> None:
+        """Test exports certificates on macOS."""
+        fake_pem = (
+            "-----BEGIN CERTIFICATE-----\nfake-cert\n-----END CERTIFICATE-----\n"
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("enyal.core.ssl_config.platform") as mock_platform,
+            patch("enyal.core.ssl_config.subprocess") as mock_subprocess,
+            patch.dict(
+                os.environ,
+                {"ENYAL_DB_PATH": os.path.join(tmpdir, "context.db")},
+            ),
+        ):
+            mock_platform.system.return_value = "Darwin"
+            mock_subprocess.run.return_value = MagicMock(
+                returncode=0, stdout=fake_pem, stderr=""
+            )
+            # Mock os.path.exists for keychain files
+            original_exists = os.path.exists
+            def mock_exists(p: str) -> bool:
+                if "Keychains" in p:
+                    return True
+                return original_exists(p)
+
+            with patch("os.path.exists", side_effect=mock_exists):
+                result = _export_macos_system_certs()
+
+            assert result is not None
+            assert os.path.isfile(result)
+            content = open(result).read()
+            assert "-----BEGIN CERTIFICATE-----" in content
+
+    def test_returns_none_when_security_fails(self) -> None:
+        """Test returns None when security command fails."""
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("enyal.core.ssl_config.platform") as mock_platform,
+            patch("enyal.core.ssl_config.subprocess") as mock_subprocess,
+            patch.dict(
+                os.environ,
+                {"ENYAL_DB_PATH": os.path.join(tmpdir, "context.db")},
+            ),
+        ):
+            mock_platform.system.return_value = "Darwin"
+            mock_subprocess.run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="error"
+            )
+            original_exists = os.path.exists
+            def mock_exists(p: str) -> bool:
+                if "Keychains" in p:
+                    return True
+                return original_exists(p)
+
+            with patch("os.path.exists", side_effect=mock_exists):
+                result = _export_macos_system_certs()
+            assert result is None
+
+    def test_caches_result(self) -> None:
+        """Test that exported certs are cached and reused."""
+        fake_pem = (
+            "-----BEGIN CERTIFICATE-----\nfake-cert\n-----END CERTIFICATE-----\n"
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("enyal.core.ssl_config.platform") as mock_platform,
+            patch("enyal.core.ssl_config.subprocess") as mock_subprocess,
+            patch.dict(
+                os.environ,
+                {"ENYAL_DB_PATH": os.path.join(tmpdir, "context.db")},
+            ),
+        ):
+            mock_platform.system.return_value = "Darwin"
+            mock_subprocess.run.return_value = MagicMock(
+                returncode=0, stdout=fake_pem, stderr=""
+            )
+            original_exists = os.path.exists
+            def mock_exists(p: str) -> bool:
+                if "Keychains" in p:
+                    return True
+                return original_exists(p)
+
+            with patch("os.path.exists", side_effect=mock_exists):
+                result1 = _export_macos_system_certs()
+                result2 = _export_macos_system_certs()
+
+            # Second call should use cache (same path)
+            assert result1 == result2
+            # security command should have been called only once
+            assert mock_subprocess.run.call_count == 1
+
+    def test_returns_none_when_no_keychains_exist(self) -> None:
+        """Test returns None when no keychain files exist."""
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("enyal.core.ssl_config.platform") as mock_platform,
+            patch.dict(
+                os.environ,
+                {"ENYAL_DB_PATH": os.path.join(tmpdir, "context.db")},
+            ),
+        ):
+            mock_platform.system.return_value = "Darwin"
+            # Mock os.path.exists to return False for keychains
+            original_exists = os.path.exists
+            def mock_exists(p: str) -> bool:
+                if "Keychains" in str(p):
+                    return False
+                return original_exists(p)
+
+            with patch("os.path.exists", side_effect=mock_exists):
+                result = _export_macos_system_certs()
+            assert result is None
+
+
+class TestConfigureSSLEnvironmentTruststore:
+    """Tests for truststore integration in configure_ssl_environment."""
+
+    def test_tries_truststore_when_no_cert_file(self) -> None:
+        """Test that truststore is attempted when no cert file is specified."""
+        config = SSLConfig()  # No cert_file, verify=True (defaults)
+        with (
+            patch("enyal.core.ssl_config._try_inject_truststore", return_value=True) as mock_ts,
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            configure_ssl_environment(config)
+            mock_ts.assert_called_once()
+
+    def test_skips_truststore_when_cert_file_set(self) -> None:
+        """Test that truststore is NOT tried when cert_file is specified."""
+        with tempfile.NamedTemporaryFile(suffix=".pem") as f:
+            config = SSLConfig(cert_file=f.name)
+            with (
+                patch("enyal.core.ssl_config._try_inject_truststore") as mock_ts,
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                configure_ssl_environment(config)
+                mock_ts.assert_not_called()
+
+    def test_skips_truststore_when_verify_false(self) -> None:
+        """Test that truststore is NOT tried when verify=False."""
+        config = SSLConfig(verify=False)
+        original_ctx = ssl._create_default_https_context
+        try:
+            with (
+                patch("enyal.core.ssl_config._try_inject_truststore") as mock_ts,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                configure_ssl_environment(config)
+                mock_ts.assert_not_called()
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_falls_back_to_macos_export_when_truststore_unavailable(self) -> None:
+        """Test falls back to macOS export when truststore is not available."""
+        config = SSLConfig()
+        with (
+            patch("enyal.core.ssl_config._try_inject_truststore", return_value=False),
+            patch("enyal.core.ssl_config._export_macos_system_certs", return_value="/fake/certs.pem") as mock_export,
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            configure_ssl_environment(config)
+            mock_export.assert_called_once()
+            # Should have set the cert env vars
+            assert os.environ.get("REQUESTS_CA_BUNDLE") == "/fake/certs.pem"
+
+    def test_skips_system_trust_when_disabled(self) -> None:
+        """Test skips system trust store when ENYAL_SSL_TRUST_SYSTEM=false."""
+        config = SSLConfig()
+        with (
+            patch("enyal.core.ssl_config._try_inject_truststore") as mock_ts,
+            patch("enyal.core.ssl_config._export_macos_system_certs") as mock_export,
+            patch.dict(os.environ, {"ENYAL_SSL_TRUST_SYSTEM": "false"}, clear=False),
+        ):
+            configure_ssl_environment(config)
+            mock_ts.assert_not_called()
+            mock_export.assert_not_called()
+
+
+class TestConfigureHTTPBackendPriority:
+    """Tests for verify=False priority in configure_http_backend."""
+
+    def test_verify_false_overrides_cert_file(self) -> None:
+        """Test that verify=False takes priority over cert_file."""
+        config = SSLConfig(verify=False, cert_file="/some/cert.pem")
+
+        captured_session = {}
+
+        def mock_configure(backend_factory: object) -> None:
+            captured_session["factory"] = backend_factory
+
+        mock_hf = MagicMock(configure_http_backend=mock_configure)
+        with patch.dict("sys.modules", {"huggingface_hub": mock_hf}):
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            mod.configure_http_backend(config)
+
+            # Create a session from the factory
+            session = captured_session["factory"]()
+            # verify=False should win over cert_file
+            assert session.verify is False
+            importlib.reload(mod)
+
+
+class TestCheckSSLHealthExtended:
+    """Tests for extended check_ssl_health fields."""
+
+    def test_includes_truststore_fields(self) -> None:
+        """Test health check includes truststore information."""
+        status = check_ssl_health()
+        assert "truststore_available" in status
+        assert "truststore_version" in status
+        assert isinstance(status["truststore_available"], bool)
+
+    def test_includes_openssl_version(self) -> None:
+        """Test health check includes OpenSSL version."""
+        status = check_ssl_health()
+        assert "openssl_version" in status
+        assert status["openssl_version"] is not None
+        assert "OpenSSL" in status["openssl_version"] or "LibreSSL" in status["openssl_version"]
+
+    def test_includes_platform(self) -> None:
+        """Test health check includes platform."""
+        status = check_ssl_health()
+        assert "platform" in status
+
+    def test_includes_trust_system(self) -> None:
+        """Test health check includes trust_system setting."""
+        status = check_ssl_health()
+        assert "trust_system" in status

@@ -1,6 +1,6 @@
 [project]
 name = "enyal"
-version = "0.6.1"
+version = "0.7.0"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -45,6 +45,11 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
     "types-requests>=2.31.0",
+]
+corporate = [
+    # Recommended for corporate environments with SSL inspection (Netskope, Zscaler, etc.)
+    # Makes Python use the OS native trust store instead of certifi
+    "truststore>=0.9.0",
 ]
 onnx = [
     "onnxruntime>=1.18.0",

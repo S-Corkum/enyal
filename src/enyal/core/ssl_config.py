@@ -1,8 +1,15 @@
 """SSL and network configuration for corporate environments.
 
 This module handles SSL certificate configuration for users in corporate networks
-with SSL inspection (e.g., Zscaler, BlueCoat, corporate proxies) that inject
-enterprise CA certificates into the SSL chain.
+with SSL inspection (e.g., Netskope, Zscaler, BlueCoat, corporate proxies) that
+inject enterprise CA certificates into the SSL chain.
+
+SSL Resolution Order:
+    1. ENYAL_SSL_VERIFY=false  -> Disable ALL SSL verification (nuclear option)
+    2. ENYAL_SSL_CERT_FILE     -> Use explicit certificate bundle
+    3. truststore package       -> Use OS native trust store (recommended for corporate)
+    4. macOS Keychain export    -> Auto-extract system-trusted certs (macOS only)
+    5. certifi (default)        -> Python's bundled CA certificates
 
 Environment Variables:
     ENYAL_SSL_CERT_FILE: Path to corporate CA certificate or bundle file.
@@ -10,15 +17,23 @@ Environment Variables:
         combined with the standard CA bundle (via certifi) so that both corporate
         and public HTTPS connections work correctly.
     ENYAL_SSL_VERIFY: Enable/disable SSL verification (default: "true")
+    ENYAL_SSL_TRUST_SYSTEM: Use OS native trust store when no cert file specified
+        (default: "true"). Tries truststore package first, then macOS Keychain export.
     ENYAL_MODEL_PATH: Local path to pre-downloaded model
     ENYAL_OFFLINE_MODE: Force offline-only operation (default: "false")
     ENYAL_HF_ENDPOINT: Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy)
     HF_HOME: Hugging Face cache directory (default: ~/.cache/huggingface)
 
 Platform-specific certificate locations:
-    - macOS: /etc/ssl/cert.pem or Keychain certificates
+    - macOS: /etc/ssl/cert.pem or Keychain certificates (auto-detected)
     - Linux: /etc/ssl/certs/ca-certificates.crt or /etc/pki/tls/certs/ca-bundle.crt
     - Windows: Uses certifi bundle by default
+
+Corporate SSL Notes:
+    For corporate environments with SSL inspection (Netskope, Zscaler, etc.):
+    - RECOMMENDED: pip install truststore (auto-uses OS trust store)
+    - ALTERNATIVE: Set ENYAL_SSL_CERT_FILE to your corporate CA bundle
+    - LAST RESORT: Set ENYAL_SSL_VERIFY=false to disable verification
 
 Security Notes:
     - Disabling SSL verification is NOT recommended and will produce warnings
@@ -30,6 +45,7 @@ import hashlib
 import logging
 import os
 import platform
+import subprocess
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,6 +332,180 @@ def _ensure_combined_cert_bundle(cert_file: str) -> str:
         return cert_file
 
 
+def _try_inject_truststore() -> bool:
+    """Try to inject OS native trust store via the ``truststore`` package.
+
+    When ``truststore`` is installed, it monkey-patches Python's ``ssl`` module
+    so that ``ssl.SSLContext`` uses the operating system's certificate trust
+    store instead of certifi's bundled CA certificates.  This means that any
+    CA certificate trusted by the OS (including corporate proxies like Netskope,
+    Zscaler, BlueCoat, etc.) will automatically be trusted by Python.
+
+    Returns:
+        True if truststore was successfully injected, False otherwise.
+    """
+    try:
+        import truststore  # type: ignore[import-untyped,unused-ignore]
+
+        truststore.inject_into_ssl()
+        logger.info("SSL: Using OS native trust store (truststore package)")
+        return True
+    except ImportError:
+        logger.debug("truststore package not installed (pip install truststore)")
+        return False
+    except Exception as e:
+        logger.warning(f"truststore injection failed: {e}")
+        return False
+
+
+def _export_macos_system_certs() -> str | None:
+    """Export macOS system certificates to a PEM bundle for use by requests/urllib3.
+
+    On macOS, corporate CA certificates (Netskope, Zscaler, etc.) are installed
+    into the System Keychain by MDM or IT policy.  However, Python's ``requests``
+    library uses ``certifi``'s CA bundle, which does **not** include these
+    corporate certificates.  This causes SSL errors when corporate proxies
+    perform SSL inspection.
+
+    This function exports all trusted certificates from the macOS Keychains,
+    combines them with the certifi bundle, and caches the result.  The combined
+    bundle includes both standard root CAs and corporate proxy certificates.
+
+    Keychains exported:
+        - /System/Library/Keychains/SystemRootCertificates.keychain (Apple roots)
+        - /Library/Keychains/System.keychain (system-wide, MDM-deployed certs)
+
+    Returns:
+        Path to the combined PEM bundle, or None if export fails.
+    """
+    if platform.system() != "Darwin":
+        return None
+
+    enyal_dir = Path(
+        os.environ.get("ENYAL_DB_PATH", "~/.enyal/context.db")
+    ).expanduser().parent
+    enyal_dir.mkdir(parents=True, exist_ok=True)
+    system_certs_path = enyal_dir / "macos_system_certs.pem"
+
+    # Re-export if file doesn't exist or is older than 24 hours
+    if system_certs_path.exists():
+        import time
+
+        age_hours = (time.time() - system_certs_path.stat().st_mtime) / 3600
+        if age_hours < 24:
+            cert_count = _count_pem_certs(system_certs_path.read_text(errors="replace"))
+            if cert_count > 0:
+                logger.debug(
+                    f"Using cached macOS system certificates "
+                    f"({cert_count} certs, {age_hours:.1f}h old)"
+                )
+                return str(system_certs_path)
+
+    # Export certificates from macOS Keychains
+    keychains = [
+        "/System/Library/Keychains/SystemRootCertificates.keychain",
+        "/Library/Keychains/System.keychain",
+    ]
+
+    # Filter to keychains that actually exist
+    existing_keychains = [k for k in keychains if os.path.exists(k)]
+    if not existing_keychains:
+        logger.debug("No macOS system keychains found")
+        return None
+
+    try:
+        result = subprocess.run(
+            ["security", "find-certificate", "-a", "-p", *existing_keychains],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        if result.returncode != 0:
+            logger.debug(f"security find-certificate failed: {result.stderr}")
+            return None
+
+        keychain_certs = result.stdout
+        if "-----BEGIN CERTIFICATE-----" not in keychain_certs:
+            logger.debug("No PEM certificates found in macOS Keychains")
+            return None
+
+        keychain_cert_count = _count_pem_certs(keychain_certs)
+
+        # Combine with certifi for maximum coverage
+        certifi_path = _get_certifi_bundle()
+        if certifi_path:
+            with open(certifi_path, errors="replace") as f:
+                certifi_content = f.read()
+
+            if not certifi_content.endswith("\n"):
+                certifi_content += "\n"
+
+            combined = (
+                certifi_content
+                + "\n# macOS System Keychain certificates\n"
+                + keychain_certs
+            )
+        else:
+            combined = keychain_certs
+
+        system_certs_path.write_text(combined)
+        total_count = _count_pem_certs(combined)
+        logger.info(
+            f"Exported macOS system certificates: {system_certs_path} "
+            f"({keychain_cert_count} from Keychain, {total_count} total)"
+        )
+        return str(system_certs_path)
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Timed out exporting macOS Keychain certificates")
+        return None
+    except OSError as e:
+        logger.debug(f"Failed to export macOS system certificates: {e}")
+        return None
+
+
+def _disable_ssl_globally() -> None:
+    """Disable SSL certificate verification for the entire Python process.
+
+    This is the nuclear option -- it disables SSL verification at every layer:
+
+    1. Python ``ssl`` module: Replaces the default HTTPS context with an
+       unverified one, so that ``urllib.request``, ``http.client``, and any
+       other stdlib networking that uses ``ssl.create_default_context()``
+       will skip certificate validation.
+
+    2. ``urllib3`` warnings: Suppresses ``InsecureRequestWarning`` to avoid
+       flooding logs with warnings on every HTTPS request.
+
+    3. Environment variables: Sets ``PYTHONHTTPSVERIFY=0`` as a belt-and-
+       suspenders measure for any subprocess or library that checks it.
+
+    Warning:
+        This should only be used as an absolute last resort when both
+        ``truststore`` and ``ENYAL_SSL_CERT_FILE`` are not viable options.
+    """
+    import ssl
+
+    # Replace the default HTTPS context factory so ALL Python SSL connections
+    # skip certificate verification.  This covers urllib, http.client, and any
+    # library that calls ssl.create_default_context().
+    ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]  # noqa: SLF001
+
+    # Suppress urllib3 InsecureRequestWarning (used by requests)
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
+
+    # Belt-and-suspenders: env var checked by some libraries / subprocesses
+    os.environ["PYTHONHTTPSVERIFY"] = "0"
+
+    logger.warning("SSL verification disabled globally for this process")
+
+
 def get_ssl_config() -> SSLConfig:
     """
     Get SSL configuration from environment variables.
@@ -326,6 +516,7 @@ def get_ssl_config() -> SSLConfig:
     Environment Variables:
         ENYAL_SSL_CERT_FILE: Path to CA certificate bundle
         ENYAL_SSL_VERIFY: "true" or "false" (default: "true")
+        ENYAL_SSL_TRUST_SYSTEM: "true" or "false" (default: "true")
         ENYAL_MODEL_PATH: Local path to pre-downloaded model
         ENYAL_OFFLINE_MODE: "true" or "false" (default: "false")
         ENYAL_HF_ENDPOINT: Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy)
@@ -383,6 +574,13 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
     This should be called BEFORE importing sentence_transformers or
     any library that makes HTTP requests to Hugging Face Hub.
 
+    SSL Resolution Order:
+        1. ENYAL_SSL_VERIFY=false  -> Disable ALL SSL verification globally
+        2. ENYAL_SSL_CERT_FILE     -> Use explicit certificate bundle
+        3. truststore package       -> Use OS native trust store (if installed)
+        4. macOS Keychain export    -> Auto-extract system-trusted certs
+        5. certifi (default)        -> Python's bundled CA certificates
+
     Args:
         config: SSLConfig to apply. If None, reads from environment.
 
@@ -393,19 +591,31 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
     if config is None:
         config = get_ssl_config()
 
-    # Handle SSL verification
+    # ── APPROACH 1: Nuclear disable ──────────────────────────────────────
+    # When verify=False, disable SSL verification at EVERY layer to ensure
+    # no code path can still fail on certificate validation.
     if not config.verify:
         warnings.warn(
-            "SSL verification is disabled. This is insecure and should only be used "
-            "as a last resort. Consider using ENYAL_SSL_CERT_FILE to specify your "
-            "corporate CA bundle instead.",
+            "SSL verification is disabled (ENYAL_SSL_VERIFY=false). "
+            "This is insecure and should only be used as a last resort. "
+            "Consider: pip install truststore (uses OS trust store), or "
+            "set ENYAL_SSL_CERT_FILE to your corporate CA bundle.",
             UserWarning,
             stacklevel=2,
         )
-        logger.warning("SSL verification disabled - connections are NOT secure")
+        _disable_ssl_globally()
 
-    # Set CA bundle if specified
-    if config.cert_file:
+        # Disable Rust-based download paths that bypass Python SSL entirely
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        # Corporate networks need generous timeouts
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+        # Continue to handle offline mode, HF home, and endpoint below
+
+    # ── APPROACH 2: Explicit cert file ───────────────────────────────────
+    elif config.cert_file:
         if not os.path.isfile(config.cert_file):
             logger.error(f"CA bundle file not found: {config.cert_file}")
             raise FileNotFoundError(f"CA bundle file not found: {config.cert_file}")
@@ -423,8 +633,6 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
                 f"Using combined CA bundle: {effective_cert} "
                 f"(original: {config.cert_file})"
             )
-            # Update config so downstream consumers (configure_http_backend) also
-            # use the combined bundle
             config.cert_file = effective_cert
         else:
             logger.info(f"Using CA bundle: {config.cert_file}")
@@ -433,21 +641,42 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
         os.environ["SSL_CERT_FILE"] = config.cert_file
         os.environ["CURL_CA_BUNDLE"] = config.cert_file
 
-    # Disable HuggingFace Xet storage when custom SSL config is active.
-    # Xet uses a native Rust TLS stack that bypasses Python's requests library,
-    # REQUESTS_CA_BUNDLE, SSL_CERT_FILE, and configure_http_backend() entirely.
-    # On corporate networks with SSL inspection (Netskope, Zscaler, BlueCoat),
-    # Xet connections will fail because the native TLS stack doesn't know about
-    # the corporate CA certificate. Disabling Xet forces huggingface_hub to use
-    # standard HTTP downloads where our SSL configuration is respected.
-    if config.cert_file or not config.verify:
+        # Disable Rust-based download paths that bypass Python SSL
         os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
         logger.debug(
-            "Disabled HF Xet storage (incompatible with custom SSL configuration)"
+            "Disabled HF Xet/hf_transfer (incompatible with custom SSL configuration)"
         )
-        # Corporate SSL inspection adds latency; use generous timeouts
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+    # ── APPROACH 3 & 4: Auto-detect system trust store ───────────────────
+    else:
+        trust_system = _parse_bool_env("ENYAL_SSL_TRUST_SYSTEM", default=True)
+        if trust_system:
+            # Try truststore first (cross-platform, preferred)
+            if _try_inject_truststore():
+                # truststore handles everything via OS trust store.
+                # Disable Rust-based paths that bypass Python SSL.
+                os.environ["HF_HUB_DISABLE_XET"] = "1"
+                os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+                os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+                os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+            else:
+                # Fallback: macOS Keychain certificate export
+                system_cert_path = _export_macos_system_certs()
+                if system_cert_path:
+                    config.cert_file = system_cert_path
+                    os.environ["REQUESTS_CA_BUNDLE"] = system_cert_path
+                    os.environ["SSL_CERT_FILE"] = system_cert_path
+                    os.environ["CURL_CA_BUNDLE"] = system_cert_path
+                    os.environ["HF_HUB_DISABLE_XET"] = "1"
+                    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+                    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+                    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+                # else: fall through to default certifi behavior
+
+    # ── Common configuration (applies regardless of SSL approach) ────────
 
     # Set HF_HOME if specified
     if config.hf_home:
@@ -502,12 +731,12 @@ def configure_http_backend(config: SSLConfig | None = None) -> None:
         """Create a requests session with custom SSL configuration."""
         session = requests.Session()
 
-        # Configure SSL verification
-        if config.cert_file:
-            session.verify = config.cert_file
-        elif not config.verify:
+        # Configure SSL verification (verify=False takes highest priority)
+        if not config.verify:
             session.verify = False
-        # else: use default (True with system certs)
+        elif config.cert_file:
+            session.verify = config.cert_file
+        # else: use default (True with system certs / truststore)
 
         return session
 
@@ -569,17 +798,38 @@ def check_ssl_health() -> dict[str, str | bool | None]:
     """
     config = get_ssl_config()
 
+    # Check truststore availability
+    truststore_available = False
+    truststore_version: str | None = None
+    try:
+        import truststore  # type: ignore[import-untyped,unused-ignore]
+
+        truststore_available = True
+        truststore_version = getattr(truststore, "__version__", "installed")
+    except ImportError:
+        pass
+
     result: dict[str, str | bool | None] = {
         "ssl_verify": config.verify,
         "cert_file": config.cert_file,
         "cert_file_exists": config.cert_file is not None and os.path.isfile(config.cert_file),
+        "trust_system": _parse_bool_env("ENYAL_SSL_TRUST_SYSTEM", default=True),
+        "truststore_available": truststore_available,
+        "truststore_version": truststore_version,
         "model_path": config.model_path,
         "model_path_exists": config.model_path is not None and os.path.isdir(config.model_path),
         "offline_mode": config.offline_mode,
         "hf_home": config.hf_home,
         "hf_endpoint": config.hf_endpoint,
         "system_ca_bundle": _find_system_ca_bundle(),
+        "platform": platform.system(),
     }
+
+    # macOS-specific: check Keychain availability
+    if platform.system() == "Darwin":
+        result["macos_system_keychain"] = os.path.exists(
+            "/Library/Keychains/System.keychain"
+        )
 
     # Check if we can import huggingface_hub
     try:
@@ -596,6 +846,14 @@ def check_ssl_health() -> dict[str, str | bool | None]:
         result["sentence_transformers_version"] = sentence_transformers.__version__
     except ImportError:
         result["sentence_transformers_version"] = None
+
+    # Report OpenSSL version (critical for diagnosing cert issues)
+    try:
+        import ssl
+
+        result["openssl_version"] = ssl.OPENSSL_VERSION
+    except Exception:
+        result["openssl_version"] = None
 
     return result
 

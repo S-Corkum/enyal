@@ -923,13 +923,19 @@ class TestCmdModelStatus:
             "ssl_verify": True,
             "cert_file": None,
             "cert_file_exists": False,
+            "trust_system": True,
+            "truststore_available": False,
+            "truststore_version": None,
             "model_path": None,
             "model_path_exists": False,
             "offline_mode": False,
             "hf_home": None,
+            "hf_endpoint": None,
             "system_ca_bundle": "/etc/ssl/cert.pem",
+            "platform": "Darwin",
             "huggingface_hub_version": "0.20.0",
             "sentence_transformers_version": "2.7.0",
+            "openssl_version": "OpenSSL 3.0.0",
         }
 
         with patch("enyal.core.ssl_config.check_ssl_health") as mock_health:
@@ -953,13 +959,19 @@ class TestCmdModelStatus:
             "ssl_verify": True,
             "cert_file": "/path/to/cert.pem",
             "cert_file_exists": True,
+            "trust_system": True,
+            "truststore_available": False,
+            "truststore_version": None,
             "model_path": "/path/to/model",
             "model_path_exists": True,
             "offline_mode": True,
             "hf_home": "/custom/hf",
+            "hf_endpoint": None,
             "system_ca_bundle": None,
+            "platform": "Darwin",
             "huggingface_hub_version": None,
             "sentence_transformers_version": None,
+            "openssl_version": "OpenSSL 3.0.0",
         }
 
         with patch("enyal.core.ssl_config.check_ssl_health") as mock_health:
