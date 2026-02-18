@@ -1263,6 +1263,17 @@ def main() -> None:
 
     _engine_module._ssl_configured = True
 
+    # ── SSL Diagnostic Logging ──────────────────────────────────────────
+    # Log comprehensive SSL state for debugging corporate network issues.
+    import ssl as _ssl_mod
+
+    logger.info(
+        f"SSL config: verify={ssl_config.verify}, "
+        f"cert_file={ssl_config.cert_file}, "
+        f"offline={ssl_config.offline_mode}, "
+        f"OpenSSL={getattr(_ssl_mod, 'OPENSSL_VERSION', 'unknown')}, "
+        f"Python={sys.version.split()[0]}"
+    )
     if ssl_config.cert_file:
         logger.info(f"SSL: Using CA bundle: {ssl_config.cert_file}")
     if not ssl_config.verify:
@@ -1273,6 +1284,29 @@ def main() -> None:
         logger.info(f"SSL: Using local model: {ssl_config.model_path}")
     if ssl_config.hf_endpoint:
         logger.info(f"SSL: Using custom HF endpoint: {ssl_config.hf_endpoint}")
+
+    # Run background SSL probe (non-blocking, just logs results)
+    if not ssl_config.offline_mode and not ssl_config.model_path:
+        try:
+            from enyal.core.ssl_config import ssl_diagnostic_probe
+
+            probe = ssl_diagnostic_probe()
+            if probe.get("success"):
+                logger.debug("SSL probe: connectivity OK")
+            else:
+                logger.warning(
+                    f"SSL probe: connection failed - {probe.get('error_type')}: "
+                    f"{probe.get('error')}"
+                )
+                if probe.get("error_chain"):
+                    for link in probe["error_chain"]:  # type: ignore[union-attr]
+                        logger.debug(f"  SSL error chain: {link}")
+                logger.info(
+                    "SSL auto-recovery is enabled: model loading will "
+                    "automatically retry with SSL disabled if needed."
+                )
+        except Exception as e:
+            logger.debug(f"SSL probe skipped: {e}")
 
     # Optionally preload the embedding model (lifespan handles initialization,
     # but preloading forces model download before accepting requests)

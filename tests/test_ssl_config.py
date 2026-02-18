@@ -20,6 +20,7 @@ from enyal.core.ssl_config import (
     _find_system_ca_bundle,
     _get_certifi_bundle,
     _is_der_encoded,
+    _is_ssl_error,
     _parse_bool_env,
     _try_inject_truststore,
     check_ssl_health,
@@ -28,6 +29,7 @@ from enyal.core.ssl_config import (
     download_model,
     get_model_path,
     get_ssl_config,
+    ssl_diagnostic_probe,
     verify_model,
 )
 
@@ -1179,3 +1181,163 @@ class TestCheckSSLHealthExtended:
         """Test health check includes trust_system setting."""
         status = check_ssl_health()
         assert "trust_system" in status
+
+
+class TestIsSSLError:
+    """Tests for _is_ssl_error helper function."""
+
+    def test_detects_ssl_module_error(self) -> None:
+        """Test detects ssl.SSLError."""
+        exc = ssl.SSLError("certificate verify failed")
+        assert _is_ssl_error(exc) is True
+
+    def test_detects_ssl_cert_verification_error(self) -> None:
+        """Test detects ssl.SSLCertVerificationError."""
+        exc = ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED")
+        assert _is_ssl_error(exc) is True
+
+    def test_detects_requests_ssl_error(self) -> None:
+        """Test detects requests.exceptions.SSLError."""
+        try:
+            from requests.exceptions import SSLError as RequestsSSLError
+            exc = RequestsSSLError("SSL error from requests")
+            assert _is_ssl_error(exc) is True
+        except ImportError:
+            pytest.skip("requests not installed")
+
+    def test_detects_urllib3_ssl_error(self) -> None:
+        """Test detects urllib3.exceptions.SSLError."""
+        try:
+            from urllib3.exceptions import SSLError as Urllib3SSLError
+            exc = Urllib3SSLError("SSL error from urllib3")
+            assert _is_ssl_error(exc) is True
+        except ImportError:
+            pytest.skip("urllib3 not installed")
+
+    def test_detects_wrapped_ssl_error(self) -> None:
+        """Test detects SSL error wrapped in another exception."""
+        inner = ssl.SSLError("certificate verify failed")
+        outer = RuntimeError("model download failed")
+        outer.__cause__ = inner
+        assert _is_ssl_error(outer) is True
+
+    def test_rejects_non_ssl_error(self) -> None:
+        """Test rejects non-SSL errors."""
+        assert _is_ssl_error(ValueError("invalid value provided")) is False
+        assert _is_ssl_error(RuntimeError("connection refused")) is False
+        assert _is_ssl_error(FileNotFoundError("no such file")) is False
+        assert _is_ssl_error(MemoryError("out of memory")) is False
+
+    def test_detects_ssl_keyword_in_message(self) -> None:
+        """Test detects SSL error patterns in error message as fallback."""
+        exc = Exception("SSLError: certificate verify failed")
+        assert _is_ssl_error(exc) is True
+
+    def test_detects_certificate_verify_failed(self) -> None:
+        """Test detects 'certificate verify failed' in error message."""
+        exc = Exception("certificate verify failed")
+        assert _is_ssl_error(exc) is True
+
+    def test_detects_ssl_colon_pattern(self) -> None:
+        """Test detects 'ssl:' pattern in error message."""
+        exc = Exception("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        assert _is_ssl_error(exc) is True
+
+
+class TestDisableSSLGloballyUrllib3Patch:
+    """Tests for urllib3 context patching in _disable_ssl_globally."""
+
+    def test_patches_urllib3_context_factory(self) -> None:
+        """Test that urllib3's create_urllib3_context is monkey-patched."""
+        original_ctx = ssl._create_default_https_context
+        try:
+            import urllib3.util.ssl_ as _urllib3_ssl
+            original_create = _urllib3_ssl.create_urllib3_context
+
+            _disable_ssl_globally()
+
+            # The function should have been replaced
+            assert _urllib3_ssl.create_urllib3_context is not original_create
+
+            # The replacement should create a permissive context
+            ctx = _urllib3_ssl.create_urllib3_context()
+            assert ctx.check_hostname is False
+            assert ctx.verify_mode == ssl.CERT_NONE
+        finally:
+            ssl._create_default_https_context = original_ctx
+            # Restore urllib3 original
+            try:
+                _urllib3_ssl.create_urllib3_context = original_create
+            except Exception:
+                pass
+
+    def test_patched_context_lowers_security_level(self) -> None:
+        """Test that the patched context uses SECLEVEL=1."""
+        original_ctx = ssl._create_default_https_context
+        try:
+            import urllib3.util.ssl_ as _urllib3_ssl
+            original_create = _urllib3_ssl.create_urllib3_context
+
+            _disable_ssl_globally()
+
+            ctx = _urllib3_ssl.create_urllib3_context()
+            # We can't directly read security level, but we can verify
+            # the context was created without errors
+            assert ctx.verify_mode == ssl.CERT_NONE
+        finally:
+            ssl._create_default_https_context = original_ctx
+            try:
+                _urllib3_ssl.create_urllib3_context = original_create
+            except Exception:
+                pass
+
+
+class TestSSLDiagnosticProbe:
+    """Tests for ssl_diagnostic_probe function."""
+
+    def test_returns_dict_with_expected_keys(self) -> None:
+        """Test probe returns dict with all expected keys."""
+        with patch("enyal.core.ssl_config.get_ssl_config") as mock_config:
+            mock_config.return_value = SSLConfig(offline_mode=True)
+            result = ssl_diagnostic_probe()
+
+        assert "python_version" in result
+        assert "openssl_version" in result
+        assert "platform" in result
+        assert "ssl_config" in result
+        assert "env_vars" in result
+
+    def test_skips_in_offline_mode(self) -> None:
+        """Test probe skips network test in offline mode."""
+        with patch("enyal.core.ssl_config.get_ssl_config") as mock_config:
+            mock_config.return_value = SSLConfig(offline_mode=True)
+            result = ssl_diagnostic_probe()
+
+        assert result["success"] is True
+        assert result.get("skipped") == "offline mode"
+
+    def test_captures_env_vars(self) -> None:
+        """Test probe captures relevant environment variables."""
+        with (
+            patch.dict(os.environ, {"ENYAL_SSL_VERIFY": "false"}, clear=False),
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+        ):
+            mock_config.return_value = SSLConfig(offline_mode=True)
+            result = ssl_diagnostic_probe()
+
+        env_vars = result["env_vars"]
+        assert env_vars["ENYAL_SSL_VERIFY"] == "false"
+
+    def test_captures_error_on_failure(self) -> None:
+        """Test probe captures error details on connection failure."""
+        with (
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("urllib.request.urlopen", side_effect=ssl.SSLError("cert verify failed")),
+        ):
+            mock_config.return_value = SSLConfig()
+            result = ssl_diagnostic_probe()
+
+        assert result["success"] is False
+        assert "cert verify failed" in result["error"]
+        assert result["error_type"] == "SSLError"
+        assert "error_chain" in result

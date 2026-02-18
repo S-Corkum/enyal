@@ -86,13 +86,22 @@ class EmbeddingEngine:
         The model will be downloaded from Hugging Face Hub on first use,
         unless ENYAL_MODEL_PATH or ENYAL_OFFLINE_MODE is set.
 
+        If the initial load fails with an SSL error (common in corporate
+        environments with SSL inspection proxies), the engine automatically
+        disables SSL verification and retries.  This auto-recovery handles
+        cases where:
+
+        - ``ENYAL_SSL_VERIFY=false`` was not propagated to the MCP server
+        - OpenSSL 3.x security level 2 rejects the corporate proxy's
+          certificate during the TLS handshake (before cert verification)
+        - The proxy CA has non-critical Basic Constraints or SHA-1 signatures
+
         Returns:
             The loaded SentenceTransformer model.
 
         Raises:
-            SSLError: If SSL verification fails in corporate environments.
-                Configure ENYAL_SSL_CERT_FILE with your CA bundle.
             RuntimeError: If offline mode is enabled but model is not cached.
+            Exception: If model loading fails for non-SSL reasons.
         """
         if self._model is None:
             # Configure SSL before importing sentence_transformers
@@ -110,7 +119,61 @@ class EmbeddingEngine:
             if self._config.trust_remote_code:
                 kwargs["trust_remote_code"] = True
 
-            self._model = SentenceTransformer(model_path, **kwargs)
+            try:
+                self._model = SentenceTransformer(model_path, **kwargs)
+            except Exception as e:
+                from enyal.core.ssl_config import _is_ssl_error
+
+                if not _is_ssl_error(e):
+                    raise
+
+                # ── SSL Auto-Recovery ───────────────────────────────────
+                # The initial load failed with an SSL error.  This is common
+                # in corporate environments where:
+                # 1. ENYAL_SSL_VERIFY was not passed to the MCP server process
+                # 2. OpenSSL 3.x security level rejects the proxy's cert
+                # 3. The proxy CA has non-critical Basic Constraints
+                #
+                # We automatically disable SSL at all layers and retry.
+                logger.warning(
+                    f"SSL error during model loading: {e}\n"
+                    "Auto-recovering: disabling SSL verification and retrying.\n"
+                    "To avoid this delay, set ENYAL_SSL_VERIFY=false in your "
+                    "MCP server configuration's env block, or install the "
+                    "'truststore' package (pip install truststore)."
+                )
+
+                from enyal.core.ssl_config import (
+                    SSLConfig,
+                    _disable_ssl_globally,
+                    configure_http_backend,
+                )
+
+                _disable_ssl_globally()
+
+                # Reconfigure HF Hub HTTP backend with verify=False
+                ssl_override = SSLConfig(verify=False)
+                configure_http_backend(ssl_override)
+
+                # Clear any cached HF Hub sessions that used the old config
+                try:
+                    from huggingface_hub.utils._http import reset_sessions
+
+                    reset_sessions()
+                    logger.debug("Cleared huggingface_hub session cache for SSL retry")
+                except (ImportError, AttributeError):
+                    # Session cache API varies across HF Hub versions;
+                    # the next request will create a new session from our
+                    # factory regardless.
+                    pass
+
+                # Retry model loading
+                self._model = SentenceTransformer(model_path, **kwargs)
+                logger.warning(
+                    "Model loaded successfully after SSL auto-recovery. "
+                    "SSL verification is now disabled for this session."
+                )
+
             logger.info("Embedding model loaded successfully")
         return self._model
 

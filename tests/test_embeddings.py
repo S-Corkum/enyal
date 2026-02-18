@@ -344,3 +344,91 @@ class TestEmbeddingEngine:
 
         call_kwargs = mock_model.encode.call_args.kwargs
         assert call_kwargs.get("show_progress_bar") is False
+
+
+class TestGetModelSSLAutoRecovery:
+    """Tests for SSL auto-recovery in get_model."""
+
+    def test_auto_recovers_on_ssl_error(self) -> None:
+        """Test that get_model retries with SSL disabled on SSL error."""
+        import ssl
+
+        config = MODEL_REGISTRY["all-MiniLM-L6-v2"]
+        engine = EmbeddingEngine(config)
+
+        mock_model = MagicMock()
+        ssl_error = ssl.SSLError("certificate verify failed")
+        call_count = 0
+
+        def side_effect(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ssl_error
+            return mock_model
+
+        original_ctx = ssl._create_default_https_context
+        try:
+            with (
+                patch("enyal.embeddings.engine._ensure_ssl_configured"),
+                patch("enyal.core.ssl_config.get_model_path", return_value="all-MiniLM-L6-v2"),
+                patch("sentence_transformers.SentenceTransformer", side_effect=side_effect),
+                patch("enyal.core.ssl_config._disable_ssl_globally"),
+                patch("enyal.core.ssl_config.configure_http_backend"),
+            ):
+                model = engine.get_model()
+
+            assert model is mock_model
+            assert call_count == 2  # Called twice: fail + retry
+        finally:
+            ssl._create_default_https_context = original_ctx
+
+    def test_raises_non_ssl_errors(self) -> None:
+        """Test that non-SSL errors are re-raised without retry."""
+        config = MODEL_REGISTRY["all-MiniLM-L6-v2"]
+        engine = EmbeddingEngine(config)
+
+        with (
+            patch("enyal.embeddings.engine._ensure_ssl_configured"),
+            patch("enyal.core.ssl_config.get_model_path", return_value="all-MiniLM-L6-v2"),
+            patch("sentence_transformers.SentenceTransformer", side_effect=RuntimeError("disk full")),
+            pytest.raises(RuntimeError, match="disk full"),
+        ):
+            engine.get_model()
+
+    def test_auto_recovers_on_wrapped_ssl_error(self) -> None:
+        """Test auto-recovery on SSL error wrapped in another exception."""
+        import ssl
+
+        config = MODEL_REGISTRY["all-MiniLM-L6-v2"]
+        engine = EmbeddingEngine(config)
+
+        mock_model = MagicMock()
+        inner = ssl.SSLError("CERTIFICATE_VERIFY_FAILED")
+        outer = OSError("model download failed")
+        outer.__cause__ = inner
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise outer
+            return mock_model
+
+        original_ctx = ssl._create_default_https_context
+        try:
+            with (
+                patch("enyal.embeddings.engine._ensure_ssl_configured"),
+                patch("enyal.core.ssl_config.get_model_path", return_value="all-MiniLM-L6-v2"),
+                patch("sentence_transformers.SentenceTransformer", side_effect=side_effect),
+                patch("enyal.core.ssl_config._disable_ssl_globally"),
+                patch("enyal.core.ssl_config.configure_http_backend"),
+            ):
+                model = engine.get_model()
+
+            assert model is mock_model
+            assert call_count == 2
+        finally:
+            ssl._create_default_https_context = original_ctx

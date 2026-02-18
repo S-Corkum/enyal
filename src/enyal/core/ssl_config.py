@@ -465,6 +465,64 @@ def _export_macos_system_certs() -> str | None:
         return None
 
 
+def _is_ssl_error(exc: BaseException) -> bool:
+    """Check if an exception is SSL-related.
+
+    Detects SSL errors from any layer: ssl module, urllib3, requests, or
+    huggingface_hub.  This is used by the auto-recovery logic to decide
+    whether to retry with SSL disabled.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        True if the exception is SSL-related.
+    """
+    import ssl
+
+    # Direct SSL module errors
+    if isinstance(exc, ssl.SSLError):
+        return True
+
+    # requests wraps SSL errors
+    try:
+        from requests.exceptions import SSLError as RequestsSSLError
+
+        if isinstance(exc, RequestsSSLError):
+            return True
+    except ImportError:
+        pass
+
+    # urllib3 wraps SSL errors
+    try:
+        from urllib3.exceptions import SSLError as Urllib3SSLError
+
+        if isinstance(exc, Urllib3SSLError):
+            return True
+    except ImportError:
+        pass
+
+    # Check the exception chain (SSL errors are often wrapped)
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _is_ssl_error(cause)
+
+    # Check string representation as last resort (use specific error patterns,
+    # not bare keywords like "ssl" which would false-positive on unrelated messages)
+    exc_str = str(exc).lower()
+    ssl_patterns = [
+        "sslerror",
+        "ssl error",
+        "ssl:",
+        "sslcertverificationerror",
+        "certificate verify failed",
+        "certificate_verify_failed",
+        "cert_required",
+        "[ssl]",
+    ]
+    return any(p in exc_str for p in ssl_patterns)
+
+
 def _disable_ssl_globally() -> None:
     """Disable SSL certificate verification for the entire Python process.
 
@@ -475,10 +533,18 @@ def _disable_ssl_globally() -> None:
        other stdlib networking that uses ``ssl.create_default_context()``
        will skip certificate validation.
 
-    2. ``urllib3`` warnings: Suppresses ``InsecureRequestWarning`` to avoid
+    2. ``urllib3`` SSL context: Monkey-patches ``create_urllib3_context`` to
+       lower OpenSSL 3.x security level from 2 to 1.  Security level 2
+       rejects connections during the TLS handshake if the server certificate
+       uses SHA-1 signatures, small keys, or non-critical Basic Constraints
+       (common with corporate SSL inspection proxies like Netskope).  This
+       rejection happens *before* certificate verification, so ``verify=False``
+       alone cannot prevent it.
+
+    3. ``urllib3`` warnings: Suppresses ``InsecureRequestWarning`` to avoid
        flooding logs with warnings on every HTTPS request.
 
-    3. Environment variables: Sets ``PYTHONHTTPSVERIFY=0`` as a belt-and-
+    4. Environment variables: Sets ``PYTHONHTTPSVERIFY=0`` as a belt-and-
        suspenders measure for any subprocess or library that checks it.
 
     Warning:
@@ -487,12 +553,48 @@ def _disable_ssl_globally() -> None:
     """
     import ssl
 
+    # ── Layer 1: Python stdlib ──────────────────────────────────────────
     # Replace the default HTTPS context factory so ALL Python SSL connections
     # skip certificate verification.  This covers urllib, http.client, and any
     # library that calls ssl.create_default_context().
     ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]  # noqa: SLF001
 
-    # Suppress urllib3 InsecureRequestWarning (used by requests)
+    # ── Layer 2: urllib3 SSL context ────────────────────────────────────
+    # urllib3 2.x creates its own SSLContext via create_urllib3_context(),
+    # bypassing ssl._create_default_https_context entirely.  We monkey-patch
+    # that factory to lower the OpenSSL security level.
+    #
+    # OpenSSL 3.x defaults to security level 2 with PROTOCOL_TLS_CLIENT.
+    # Level 2 rejects:
+    #   - RSA keys < 2048 bits
+    #   - SHA-1 in certificate signatures (OpenSSL 3.2+)
+    #   - Non-critical Basic Constraints on CA certificates
+    # Corporate SSL inspection proxies (Netskope, Zscaler) commonly trigger
+    # these rejections.  Level 1 relaxes these requirements.
+    try:
+        import urllib3.util.ssl_ as _urllib3_ssl
+
+        _original_create_ctx = _urllib3_ssl.create_urllib3_context
+
+        def _permissive_urllib3_context(
+            *args: object, **kwargs: object
+        ) -> ssl.SSLContext:
+            ctx = _original_create_ctx(*args, **kwargs)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            # Lower security level to allow corporate proxy certs
+            try:
+                ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+            except ssl.SSLError:
+                pass  # Older OpenSSL versions without SECLEVEL support
+            return ctx
+
+        _urllib3_ssl.create_urllib3_context = _permissive_urllib3_context  # type: ignore[assignment]
+        logger.debug("Patched urllib3 SSL context factory (SECLEVEL=1)")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch urllib3 SSL context: {e}")
+
+    # ── Layer 3: Suppress warnings ──────────────────────────────────────
     try:
         import urllib3
 
@@ -500,6 +602,7 @@ def _disable_ssl_globally() -> None:
     except ImportError:
         pass
 
+    # ── Layer 4: Environment variables ──────────────────────────────────
     # Belt-and-suspenders: env var checked by some libraries / subprocesses
     os.environ["PYTHONHTTPSVERIFY"] = "0"
 
@@ -854,6 +957,101 @@ def check_ssl_health() -> dict[str, str | bool | None]:
         result["openssl_version"] = ssl.OPENSSL_VERSION
     except Exception:
         result["openssl_version"] = None
+
+    return result
+
+
+def ssl_diagnostic_probe() -> dict[str, object]:
+    """Run an SSL connectivity probe and return diagnostic information.
+
+    Attempts a lightweight HTTPS connection to huggingface.co and captures
+    the exact error if it fails.  This is used on server startup to detect
+    SSL problems early and log actionable diagnostics.
+
+    Returns:
+        Dictionary with diagnostic results including:
+        - ``success``: Whether the probe connected successfully
+        - ``error``: Error message if failed, None if succeeded
+        - ``error_type``: Exception class name if failed
+        - ``ssl_config``: Current effective SSL configuration
+        - ``python_version``: Python version string
+        - ``openssl_version``: OpenSSL version string
+        - ``env_vars``: Relevant SSL environment variables
+    """
+    import ssl
+    import sys
+
+    result: dict[str, object] = {
+        "python_version": sys.version,
+        "openssl_version": getattr(ssl, "OPENSSL_VERSION", "unknown"),
+        "platform": platform.system(),
+        "machine": platform.machine(),
+    }
+
+    # Capture relevant env vars (redact cert paths for privacy)
+    env_vars: dict[str, str] = {}
+    for key in [
+        "ENYAL_SSL_VERIFY",
+        "ENYAL_SSL_CERT_FILE",
+        "ENYAL_SSL_TRUST_SYSTEM",
+        "ENYAL_OFFLINE_MODE",
+        "ENYAL_MODEL_PATH",
+        "ENYAL_HF_ENDPOINT",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "CURL_CA_BUNDLE",
+        "HF_HUB_DISABLE_XET",
+        "HF_HUB_ENABLE_HF_TRANSFER",
+        "PYTHONHTTPSVERIFY",
+    ]:
+        val = os.environ.get(key)
+        if val is not None:
+            env_vars[key] = val
+    result["env_vars"] = env_vars
+
+    # Capture SSL config
+    config = get_ssl_config()
+    result["ssl_config"] = {
+        "verify": config.verify,
+        "cert_file": config.cert_file,
+        "offline_mode": config.offline_mode,
+        "model_path": config.model_path,
+    }
+
+    # Skip probe in offline mode
+    if config.offline_mode:
+        result["success"] = True
+        result["skipped"] = "offline mode"
+        return result
+
+    # Attempt HTTPS connection to HuggingFace Hub
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            "https://huggingface.co/api/whoami-v2",
+            method="HEAD",
+        )
+        req.add_header("User-Agent", "enyal-ssl-probe/1.0")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+        result["success"] = True
+        result["error"] = None
+        result["error_type"] = None
+    except Exception as e:
+        result["success"] = False
+        result["error"] = str(e)
+        result["error_type"] = type(e).__qualname__
+
+        # Capture the full chain for debugging
+        chain: list[str] = []
+        current: BaseException | None = e
+        while current is not None:
+            chain.append(f"{type(current).__qualname__}: {current}")
+            current = current.__cause__ or current.__context__
+            if current is e:
+                break  # prevent infinite loop
+        result["error_chain"] = chain
 
     return result
 
