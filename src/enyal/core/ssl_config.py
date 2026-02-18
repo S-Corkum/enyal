@@ -1024,6 +1024,40 @@ def check_ssl_health() -> dict[str, str | bool | None]:
     return result
 
 
+def _preflight_ssl_check(
+    host: str = "huggingface.co",
+    port: int = 443,
+    timeout: float = 10.0,
+) -> tuple[bool, str | None]:
+    """Test SSL connectivity at the raw socket level.
+
+    Uses Python's ``ssl`` module directly (no urllib3, no requests, no
+    caching layers) to attempt a TLS handshake with the target host.
+    This is the most reliable way to detect SSL issues before any
+    higher-level library can cache broken connections or mask errors.
+
+    Args:
+        host: Hostname to test.
+        port: Port to test.
+        timeout: Connection timeout in seconds.
+
+    Returns:
+        Tuple of (success, error_message).  If success is True,
+        error_message is None.  If success is False, error_message
+        describes the failure.
+    """
+    import socket
+    import ssl
+
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host):
+                return True, None
+    except Exception as e:
+        return False, f"{type(e).__qualname__}: {e}"
+
+
 def ssl_diagnostic_probe() -> dict[str, object]:
     """Run an SSL connectivity probe and return diagnostic information.
 
@@ -1153,6 +1187,29 @@ def download_model(
     configure_ssl_environment(config)
     configure_http_backend(config)
 
+    # ── Preflight SSL check ─────────────────────────────────────────
+    # Test SSL connectivity at the raw socket level BEFORE any library
+    # can cache broken connections.  If the test fails, proactively
+    # disable SSL verification so the download starts clean.
+    ssl_ok, ssl_err = _preflight_ssl_check("huggingface.co")
+    if not ssl_ok:
+        logger.warning(
+            f"SSL preflight check failed: {ssl_err}\n"
+            "Proactively disabling SSL verification for model download.\n"
+            "To avoid this, install 'truststore' (pip install truststore) "
+            "or set ENYAL_SSL_VERIFY=false in your environment."
+        )
+        _disable_ssl_globally()
+        configure_http_backend(SSLConfig(verify=False))
+
+        # Clear any sessions that may have been created during import
+        try:
+            from huggingface_hub.utils._http import reset_sessions
+
+            reset_sessions()
+        except (ImportError, AttributeError):
+            pass
+
     logger.info(f"Downloading model: {model_name}")
 
     from sentence_transformers import SentenceTransformer
@@ -1181,19 +1238,20 @@ def download_model(
         kwargs["trust_remote_code"] = True
 
     # Download the model (this triggers the actual download)
-    # Wrapped in auto-recovery: if SSL fails, automatically disable SSL and retry
+    # Wrapped in auto-recovery as a backup: if the download still fails
+    # (e.g., preflight passed but library uses different SSL path), catch
+    # ANY exception, disable SSL, and retry once.
     try:
         model = SentenceTransformer(model_name, **kwargs)
-    except Exception as e:
-        if not _is_ssl_error(e):
-            raise
-
-        # ── SSL Auto-Recovery ───────────────────────────────────────
+    except Exception as first_err:
+        # ── SSL Auto-Recovery (backup) ────────────────────────────
+        # Treat ANY failure from the first attempt as a potential SSL
+        # issue and try disabling SSL.  This catches cases where the
+        # error is wrapped in a non-SSL exception by sentence_transformers
+        # or huggingface_hub.
         logger.warning(
-            f"SSL error during model download: {e}\n"
-            "Auto-recovering: disabling SSL verification and retrying.\n"
-            "To avoid this delay, set ENYAL_SSL_VERIFY=false or install "
-            "the 'truststore' package (pip install truststore)."
+            f"Model download failed: {first_err}\n"
+            "Attempting auto-recovery: disabling SSL verification and retrying."
         )
 
         _disable_ssl_globally()
@@ -1207,7 +1265,12 @@ def download_model(
         except (ImportError, AttributeError):
             pass
 
-        model = SentenceTransformer(model_name, **kwargs)
+        try:
+            model = SentenceTransformer(model_name, **kwargs)
+        except Exception as retry_err:
+            # Retry also failed -- raise the original error with context
+            raise first_err from retry_err
+
         logger.warning(
             "Model downloaded successfully after SSL auto-recovery. "
             "SSL verification was disabled for this download."

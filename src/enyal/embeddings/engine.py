@@ -112,6 +112,33 @@ class EmbeddingEngine:
             # Get model path (local or model name for download)
             model_path = get_model_path(self._config.name)
 
+            # ── Preflight SSL check ─────────────────────────────────
+            # Test SSL at the raw socket level before any library can
+            # cache broken connections.  If it fails, disable SSL now.
+            from enyal.core.ssl_config import _preflight_ssl_check
+
+            ssl_ok, ssl_err = _preflight_ssl_check("huggingface.co")
+            if not ssl_ok:
+                logger.warning(
+                    f"SSL preflight check failed: {ssl_err}\n"
+                    "Proactively disabling SSL verification for model loading."
+                )
+                from enyal.core.ssl_config import (
+                    SSLConfig,
+                    _disable_ssl_globally,
+                    configure_http_backend,
+                )
+
+                _disable_ssl_globally()
+                configure_http_backend(SSLConfig(verify=False))
+
+                try:
+                    from huggingface_hub.utils._http import reset_sessions
+
+                    reset_sessions()
+                except (ImportError, AttributeError):
+                    pass
+
             logger.info(f"Loading embedding model: {model_path}")
             from sentence_transformers import SentenceTransformer
 
@@ -121,26 +148,13 @@ class EmbeddingEngine:
 
             try:
                 self._model = SentenceTransformer(model_path, **kwargs)
-            except Exception as e:
-                from enyal.core.ssl_config import _is_ssl_error
-
-                if not _is_ssl_error(e):
-                    raise
-
-                # ── SSL Auto-Recovery ───────────────────────────────────
-                # The initial load failed with an SSL error.  This is common
-                # in corporate environments where:
-                # 1. ENYAL_SSL_VERIFY was not passed to the MCP server process
-                # 2. OpenSSL 3.x security level rejects the proxy's cert
-                # 3. The proxy CA has non-critical Basic Constraints
-                #
-                # We automatically disable SSL at all layers and retry.
+            except Exception as first_err:
+                # ── SSL Auto-Recovery (backup) ─────────────────────
+                # Treat ANY failure as a potential SSL issue and try
+                # disabling SSL.  This catches wrapped/masked errors.
                 logger.warning(
-                    f"SSL error during model loading: {e}\n"
-                    "Auto-recovering: disabling SSL verification and retrying.\n"
-                    "To avoid this delay, set ENYAL_SSL_VERIFY=false in your "
-                    "MCP server configuration's env block, or install the "
-                    "'truststore' package (pip install truststore)."
+                    f"Model loading failed: {first_err}\n"
+                    "Attempting auto-recovery: disabling SSL and retrying."
                 )
 
                 from enyal.core.ssl_config import (
@@ -150,25 +164,20 @@ class EmbeddingEngine:
                 )
 
                 _disable_ssl_globally()
+                configure_http_backend(SSLConfig(verify=False))
 
-                # Reconfigure HF Hub HTTP backend with verify=False
-                ssl_override = SSLConfig(verify=False)
-                configure_http_backend(ssl_override)
-
-                # Clear any cached HF Hub sessions that used the old config
                 try:
                     from huggingface_hub.utils._http import reset_sessions
 
                     reset_sessions()
-                    logger.debug("Cleared huggingface_hub session cache for SSL retry")
                 except (ImportError, AttributeError):
-                    # Session cache API varies across HF Hub versions;
-                    # the next request will create a new session from our
-                    # factory regardless.
                     pass
 
-                # Retry model loading
-                self._model = SentenceTransformer(model_path, **kwargs)
+                try:
+                    self._model = SentenceTransformer(model_path, **kwargs)
+                except Exception as retry_err:
+                    raise first_err from retry_err
+
                 logger.warning(
                     "Model loaded successfully after SSL auto-recovery. "
                     "SSL verification is now disabled for this session."

@@ -22,6 +22,7 @@ from enyal.core.ssl_config import (
     _is_der_encoded,
     _is_ssl_error,
     _parse_bool_env,
+    _preflight_ssl_check,
     _try_inject_truststore,
     check_ssl_health,
     configure_http_backend,
@@ -518,6 +519,7 @@ class TestDownloadModel:
             patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
             patch("enyal.core.ssl_config.configure_ssl_environment"),
             patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("enyal.core.ssl_config._preflight_ssl_check", return_value=(True, None)),
             patch("sentence_transformers.SentenceTransformer", return_value=mock_model),
         ):
             mock_config.return_value = SSLConfig(offline_mode=False)
@@ -525,6 +527,56 @@ class TestDownloadModel:
             result = download_model("test-model", cache_dir="/tmp/cache")
 
             assert result == "/cached/model/path"
+
+    def test_download_model_preflight_fails_disables_ssl(self) -> None:
+        """Test that preflight failure proactively disables SSL."""
+        mock_model = MagicMock()
+        mock_model._model_card_vars = {"model_path": "/cached/model/path"}
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend") as mock_backend,
+            patch(
+                "enyal.core.ssl_config._preflight_ssl_check",
+                return_value=(False, "SSLError: cert verify failed"),
+            ),
+            patch("enyal.core.ssl_config._disable_ssl_globally") as mock_disable,
+            patch("sentence_transformers.SentenceTransformer", return_value=mock_model),
+        ):
+            mock_config.return_value = SSLConfig(offline_mode=False)
+
+            result = download_model("test-model")
+
+            assert result == "/cached/model/path"
+            mock_disable.assert_called_once()
+            # configure_http_backend called twice: initial + after preflight failure
+            assert mock_backend.call_count == 2
+
+    def test_download_model_auto_recovery_on_any_error(self) -> None:
+        """Test that auto-recovery retries on ANY first-attempt failure."""
+        mock_model = MagicMock()
+        mock_model._model_card_vars = {"model_path": "/cached/model/path"}
+
+        # First call raises non-SSL error, second succeeds
+        mock_st = MagicMock(side_effect=[RuntimeError("download failed"), mock_model])
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("enyal.core.ssl_config.get_ssl_config") as mock_config,
+            patch("enyal.core.ssl_config.configure_ssl_environment"),
+            patch("enyal.core.ssl_config.configure_http_backend"),
+            patch("enyal.core.ssl_config._preflight_ssl_check", return_value=(True, None)),
+            patch("enyal.core.ssl_config._disable_ssl_globally"),
+            patch("sentence_transformers.SentenceTransformer", mock_st),
+        ):
+            mock_config.return_value = SSLConfig(offline_mode=False)
+
+            result = download_model("test-model")
+
+            assert result == "/cached/model/path"
+            assert mock_st.call_count == 2
 
 
 class TestVerifyModel:
@@ -1341,3 +1393,73 @@ class TestSSLDiagnosticProbe:
         assert "cert verify failed" in result["error"]
         assert result["error_type"] == "SSLError"
         assert "error_chain" in result
+
+
+class TestPreflightSSLCheck:
+    """Tests for _preflight_ssl_check function."""
+
+    def test_returns_tuple(self) -> None:
+        """Test that it returns a (bool, str|None) tuple."""
+        with (
+            patch("socket.create_connection") as mock_conn,
+            patch("ssl.create_default_context") as mock_ctx,
+        ):
+            mock_sock = MagicMock()
+            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ctx.return_value.wrap_socket.return_value.__enter__ = (
+                lambda s: MagicMock()
+            )
+            mock_ctx.return_value.wrap_socket.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
+            result = _preflight_ssl_check()
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_success_returns_true_none(self) -> None:
+        """Test successful connection returns (True, None)."""
+        with (
+            patch("socket.create_connection") as mock_conn,
+            patch("ssl.create_default_context") as mock_ctx,
+        ):
+            mock_sock = MagicMock()
+            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ctx.return_value.wrap_socket.return_value.__enter__ = (
+                lambda s: MagicMock()
+            )
+            mock_ctx.return_value.wrap_socket.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
+            success, err = _preflight_ssl_check()
+
+        assert success is True
+        assert err is None
+
+    def test_ssl_failure_returns_false_with_error(self) -> None:
+        """Test SSL failure returns (False, error_string)."""
+        with (
+            patch("socket.create_connection") as mock_conn,
+            patch("ssl.create_default_context") as mock_ctx,
+        ):
+            mock_sock = MagicMock()
+            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ctx.return_value.wrap_socket.side_effect = ssl.SSLError(
+                "CA cert not marked as critical"
+            )
+            success, err = _preflight_ssl_check()
+
+        assert success is False
+        assert "CA cert not marked as critical" in err
+        assert "SSLError" in err
+
+    def test_connection_failure_returns_false(self) -> None:
+        """Test connection failure returns (False, error_string)."""
+        with patch("socket.create_connection", side_effect=OSError("Connection refused")):
+            success, err = _preflight_ssl_check()
+
+        assert success is False
+        assert "Connection refused" in err
