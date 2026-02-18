@@ -68,6 +68,7 @@ class TestSSLConfig:
         assert config.model_path is None
         assert config.offline_mode is False
         assert config.hf_home is None
+        assert config.hf_endpoint is None
 
     def test_custom_values(self) -> None:
         """Test SSLConfig with custom values."""
@@ -77,12 +78,14 @@ class TestSSLConfig:
             model_path="/path/to/model",
             offline_mode=True,
             hf_home="/custom/cache",
+            hf_endpoint="https://artifactory.corp.com/hf",
         )
         assert config.cert_file == "/path/to/cert.pem"
         assert config.verify is False
         assert config.model_path == "/path/to/model"
         assert config.offline_mode is True
         assert config.hf_home == "/custom/cache"
+        assert config.hf_endpoint == "https://artifactory.corp.com/hf"
 
 
 class TestGetSSLConfig:
@@ -99,6 +102,7 @@ class TestGetSSLConfig:
             assert config.verify is True
             assert config.model_path is None
             assert config.offline_mode is False
+            assert config.hf_endpoint is None
 
     def test_cert_file_from_enyal_env(self) -> None:
         """Test cert_file from ENYAL_SSL_CERT_FILE."""
@@ -158,6 +162,18 @@ class TestGetSSLConfig:
             config = get_ssl_config()
             assert config.model_path is None
 
+    def test_hf_endpoint_from_env(self) -> None:
+        """Test hf_endpoint from ENYAL_HF_ENDPOINT."""
+        with patch.dict(os.environ, {"ENYAL_HF_ENDPOINT": "https://artifactory.corp.com/hf"}):
+            config = get_ssl_config()
+            assert config.hf_endpoint == "https://artifactory.corp.com/hf"
+
+    def test_hf_endpoint_strips_trailing_slash(self) -> None:
+        """Test hf_endpoint strips trailing slash."""
+        with patch.dict(os.environ, {"ENYAL_HF_ENDPOINT": "https://artifactory.corp.com/hf/"}):
+            config = get_ssl_config()
+            assert config.hf_endpoint == "https://artifactory.corp.com/hf"
+
     def test_model_path_expands_user(self) -> None:
         """Test model path expands ~."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -210,6 +226,55 @@ class TestConfigureSSLEnvironment:
             with patch.dict(os.environ, {}, clear=False):
                 configure_ssl_environment(config)
                 assert os.environ["HF_HOME"] == tmpdir
+
+
+class TestConfigureSSLEnvironmentEndpoint:
+    """Tests for configure_ssl_environment custom HF endpoint support."""
+
+    def test_sets_hf_endpoint_env_var(self) -> None:
+        """Test sets HF_ENDPOINT environment variable."""
+        config = SSLConfig(hf_endpoint="https://artifactory.corp.com/hf")
+        with patch.dict(os.environ, {}, clear=False):
+            configure_ssl_environment(config)
+            assert os.environ["HF_ENDPOINT"] == "https://artifactory.corp.com/hf"
+
+    def test_sets_disable_xet_when_endpoint_set(self) -> None:
+        """Test disables Xet storage when custom endpoint is set."""
+        config = SSLConfig(hf_endpoint="https://artifactory.corp.com/hf")
+        with patch.dict(os.environ, {}, clear=False):
+            configure_ssl_environment(config)
+            assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+
+    def test_sets_increased_timeouts_when_endpoint_set(self) -> None:
+        """Test sets increased timeouts when custom endpoint is set."""
+        config = SSLConfig(hf_endpoint="https://artifactory.corp.com/hf")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT")}
+        with patch.dict(os.environ, env, clear=True):
+            configure_ssl_environment(config)
+            assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+            assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "60"
+
+    def test_does_not_override_user_timeout_settings(self) -> None:
+        """Test does not override user-set timeout values."""
+        config = SSLConfig(hf_endpoint="https://artifactory.corp.com/hf")
+        with patch.dict(os.environ, {
+            "HF_HUB_ETAG_TIMEOUT": "120",
+            "HF_HUB_DOWNLOAD_TIMEOUT": "300",
+        }, clear=False):
+            configure_ssl_environment(config)
+            assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "120"
+            assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "300"
+
+    def test_does_not_set_endpoint_vars_when_not_configured(self) -> None:
+        """Test does not set endpoint vars when hf_endpoint is None."""
+        config = SSLConfig()
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("HF_ENDPOINT", "HF_HUB_DISABLE_XET")}
+        with patch.dict(os.environ, env, clear=True):
+            configure_ssl_environment(config)
+            assert "HF_ENDPOINT" not in os.environ
+            assert "HF_HUB_DISABLE_XET" not in os.environ
 
 
 class TestConfigureHTTPBackend:
@@ -291,6 +356,7 @@ class TestCheckSSLHealth:
             "model_path_exists",
             "offline_mode",
             "hf_home",
+            "hf_endpoint",
             "system_ca_bundle",
             "huggingface_hub_version",
             "sentence_transformers_version",

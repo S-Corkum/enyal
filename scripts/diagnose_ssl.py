@@ -54,6 +54,8 @@ def main() -> None:
           os.environ.get("REQUESTS_CA_BUNDLE", "(not set)"))
     check("SSL_CERT_FILE", bool(os.environ.get("SSL_CERT_FILE")),
           os.environ.get("SSL_CERT_FILE", "(not set)"))
+    hf_endpoint = os.environ.get("ENYAL_HF_ENDPOINT", "")
+    check("ENYAL_HF_ENDPOINT", bool(hf_endpoint), hf_endpoint or "(not set)")
 
     model_name = os.environ.get("ENYAL_MODEL_NAME", "nomic-ai/nomic-embed-text-v1.5")
     print(f"\n  Model to test: {model_name}")
@@ -142,13 +144,16 @@ def main() -> None:
         check("requests importable", True, f"v{requests.__version__}")
 
         # Test with combined cert file (or original if no combined)
+        hf_base = hf_endpoint.rstrip("/") if hf_endpoint else "https://huggingface.co"
+        api_url = f"{hf_base}/api/models/sentence-transformers/all-MiniLM-L6-v2"
+        if hf_endpoint:
+            print(f"\n  Using custom endpoint: {hf_base}")
+
         for label, test_cert in [("original", cert_file), ("combined", combined_cert_file)]:
             if test_cert == cert_file and label == "combined":
                 continue
             try:
-                resp = requests.get(
-                    "https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2",
-                    verify=test_cert, timeout=10)
+                resp = requests.get(api_url, verify=test_cert, timeout=10)
                 check(f"HuggingFace API ({label} cert)", resp.ok, f"HTTP {resp.status_code}")
             except requests.exceptions.SSLError as e:
                 check(f"HuggingFace API ({label} cert)", False, f"SSL Error: {str(e)[:200]}")
@@ -160,9 +165,7 @@ def main() -> None:
         os.environ["SSL_CERT_FILE"] = combined_cert_file
         os.environ["CURL_CA_BUNDLE"] = combined_cert_file
         try:
-            resp = requests.get(
-                "https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2",
-                timeout=10)
+            resp = requests.get(api_url, timeout=10)
             check("HuggingFace API (via env vars)", resp.ok, f"HTTP {resp.status_code}")
         except requests.exceptions.SSLError as e:
             check("HuggingFace API (via env vars)", False, f"SSL Error: {str(e)[:200]}")
@@ -274,6 +277,9 @@ def main() -> None:
     print("  Checking if ENYAL_SSL_CERT_FILE would be available to MCP server...")
 
     # Show what the Claude Code MCP config should look like
+    endpoint_line = ""
+    if hf_endpoint:
+        endpoint_line = f',\n      "ENYAL_HF_ENDPOINT": "{hf_endpoint}"'
     print(f"""
   Your Claude Code MCP settings (~/.claude/settings.json) should include
   ENYAL_SSL_CERT_FILE in the 'env' section:
@@ -283,7 +289,7 @@ def main() -> None:
     "args": ["run", "--directory", "/path/to/enyal", "python", "-m", "enyal.mcp"],
     "env": {{
       "ENYAL_DB_PATH": "~/.enyal/context.db",
-      "ENYAL_SSL_CERT_FILE": "{cert_file}"
+      "ENYAL_SSL_CERT_FILE": "{cert_file}"{endpoint_line}
     }}
   }}
 

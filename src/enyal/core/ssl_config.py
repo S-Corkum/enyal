@@ -12,6 +12,7 @@ Environment Variables:
     ENYAL_SSL_VERIFY: Enable/disable SSL verification (default: "true")
     ENYAL_MODEL_PATH: Local path to pre-downloaded model
     ENYAL_OFFLINE_MODE: Force offline-only operation (default: "false")
+    ENYAL_HF_ENDPOINT: Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy)
     HF_HOME: Hugging Face cache directory (default: ~/.cache/huggingface)
 
 Platform-specific certificate locations:
@@ -70,6 +71,9 @@ class SSLConfig:
 
     # Hugging Face cache directory
     hf_home: str | None = None
+
+    # Custom HuggingFace Hub endpoint (e.g., Artifactory proxy)
+    hf_endpoint: str | None = None
 
 
 def _parse_bool_env(key: str, default: bool = True) -> bool:
@@ -324,6 +328,7 @@ def get_ssl_config() -> SSLConfig:
         ENYAL_SSL_VERIFY: "true" or "false" (default: "true")
         ENYAL_MODEL_PATH: Local path to pre-downloaded model
         ENYAL_OFFLINE_MODE: "true" or "false" (default: "false")
+        ENYAL_HF_ENDPOINT: Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy)
         HF_HOME: Hugging Face cache directory
         REQUESTS_CA_BUNDLE: Fallback CA bundle (standard requests env var)
         SSL_CERT_FILE: Fallback CA bundle (standard Python env var)
@@ -356,12 +361,18 @@ def get_ssl_config() -> SSLConfig:
     if hf_home:
         hf_home = os.path.expanduser(hf_home)
 
+    # Custom HuggingFace Hub endpoint (e.g., Artifactory proxy)
+    hf_endpoint = os.environ.get("ENYAL_HF_ENDPOINT")
+    if hf_endpoint:
+        hf_endpoint = hf_endpoint.rstrip("/")
+
     return SSLConfig(
         cert_file=cert_file,
         verify=verify,
         model_path=model_path,
         offline_mode=offline_mode,
         hf_home=hf_home,
+        hf_endpoint=hf_endpoint,
     )
 
 
@@ -432,6 +443,17 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         logger.info("Offline mode enabled - no network calls will be made")
+
+    # Set custom HuggingFace Hub endpoint (e.g., Artifactory proxy)
+    if config.hf_endpoint:
+        os.environ["HF_ENDPOINT"] = config.hf_endpoint
+        # Xet storage bypasses HTTP proxies entirely, so disable it
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        # First fetch through Artifactory can be slow; set generous defaults
+        # but allow user overrides via env vars
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+        logger.info(f"Using custom HF endpoint: {config.hf_endpoint}")
 
 
 def configure_http_backend(config: SSLConfig | None = None) -> None:
@@ -539,6 +561,7 @@ def check_ssl_health() -> dict[str, str | bool | None]:
         "model_path_exists": config.model_path is not None and os.path.isdir(config.model_path),
         "offline_mode": config.offline_mode,
         "hf_home": config.hf_home,
+        "hf_endpoint": config.hf_endpoint,
         "system_ca_bundle": _find_system_ca_bundle(),
     }
 

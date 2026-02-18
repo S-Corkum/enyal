@@ -1271,6 +1271,8 @@ def main() -> None:
         logger.info("SSL: Offline mode enabled")
     if ssl_config.model_path:
         logger.info(f"SSL: Using local model: {ssl_config.model_path}")
+    if ssl_config.hf_endpoint:
+        logger.info(f"SSL: Using custom HF endpoint: {ssl_config.hf_endpoint}")
 
     # Optionally preload the embedding model (lifespan handles initialization,
     # but preloading forces model download before accepting requests)

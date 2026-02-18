@@ -62,6 +62,7 @@ class EmbeddingEngine:
         - ENYAL_SSL_VERIFY: Set to "false" to disable verification (insecure)
         - ENYAL_MODEL_PATH: Path to pre-downloaded model directory
         - ENYAL_OFFLINE_MODE: Set to "true" to prevent network calls
+        - ENYAL_HF_ENDPOINT: Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy)
     """
 
     def __init__(self, config: ModelConfig | None = None) -> None:

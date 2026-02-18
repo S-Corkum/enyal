@@ -247,6 +247,7 @@ def cmd_model_status(args: argparse.Namespace) -> int:
             )
         print(f"Offline mode:         {'Enabled' if status['offline_mode'] else 'Disabled'}")
         print(f"HF cache directory:   {status['hf_home'] or 'Default (~/.cache/huggingface)'}")
+        print(f"HF endpoint:          {status['hf_endpoint'] or 'Default (https://huggingface.co)'}")
         print()
         print("Library versions:")
         print(f"  huggingface_hub:    {status['huggingface_hub_version'] or 'Not installed'}")

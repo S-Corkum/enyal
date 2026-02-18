@@ -509,6 +509,7 @@ conflicts = store.get_conflicted_entries()
 | `ENYAL_SSL_CERT_FILE` | (system) | Path to CA certificate bundle (for corporate networks) |
 | `ENYAL_SSL_VERIFY` | `true` | Enable/disable SSL verification (set `false` only as last resort) |
 | `ENYAL_MODEL_PATH` | (none) | Path to local pre-downloaded model |
+| `ENYAL_HF_ENDPOINT` | (none) | Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy) |
 | `ENYAL_OFFLINE_MODE` | `false` | Prevent network calls (use with cached/local model) |
 
 ### Database Location
@@ -628,6 +629,38 @@ enyal model status
 ```
 
 See [docs/SSL_TROUBLESHOOTING.md](docs/SSL_TROUBLESHOOTING.md) for detailed troubleshooting guide.
+
+### Custom Model Registry (Artifactory)
+
+If your organization uses Artifactory or another proxy to mirror HuggingFace models, set `ENYAL_HF_ENDPOINT` to redirect all model downloads:
+
+```bash
+export ENYAL_HF_ENDPOINT=https://artifactory.corp.com/artifactory/api/huggingface
+enyal model download
+```
+
+**For MCP configuration:**
+```json
+{
+  "mcpServers": {
+    "enyal": {
+      "command": "uvx",
+      "args": ["enyal", "serve"],
+      "env": {
+        "ENYAL_HF_ENDPOINT": "https://artifactory.corp.com/artifactory/api/huggingface",
+        "ENYAL_SSL_CERT_FILE": "/path/to/corporate-ca-bundle.crt"
+      }
+    }
+  }
+}
+```
+
+When `ENYAL_HF_ENDPOINT` is set, Enyal automatically:
+- Sets `HF_ENDPOINT` before `huggingface_hub` is imported
+- Disables HF Xet storage (`HF_HUB_DISABLE_XET=1`) since Xet bypasses HTTP proxies
+- Increases download timeouts for first-fetch latency through the proxy
+
+No additional authentication configuration is needed — Artifactory handles upstream auth transparently.
 
 ## Architecture
 
