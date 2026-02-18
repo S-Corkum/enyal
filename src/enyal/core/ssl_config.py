@@ -433,6 +433,22 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
         os.environ["SSL_CERT_FILE"] = config.cert_file
         os.environ["CURL_CA_BUNDLE"] = config.cert_file
 
+    # Disable HuggingFace Xet storage when custom SSL config is active.
+    # Xet uses a native Rust TLS stack that bypasses Python's requests library,
+    # REQUESTS_CA_BUNDLE, SSL_CERT_FILE, and configure_http_backend() entirely.
+    # On corporate networks with SSL inspection (Netskope, Zscaler, BlueCoat),
+    # Xet connections will fail because the native TLS stack doesn't know about
+    # the corporate CA certificate. Disabling Xet forces huggingface_hub to use
+    # standard HTTP downloads where our SSL configuration is respected.
+    if config.cert_file or not config.verify:
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        logger.debug(
+            "Disabled HF Xet storage (incompatible with custom SSL configuration)"
+        )
+        # Corporate SSL inspection adds latency; use generous timeouts
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
     # Set HF_HOME if specified
     if config.hf_home:
         os.environ["HF_HOME"] = config.hf_home
@@ -622,8 +638,31 @@ def download_model(
 
     from sentence_transformers import SentenceTransformer
 
+    # Look up model config to get trust_remote_code and other settings
+    from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
+
+    kwargs: dict[str, object] = {}
+    if cache_dir:
+        kwargs["cache_folder"] = cache_dir
+
+    if model_name in MODEL_REGISTRY:
+        model_config = MODEL_REGISTRY[model_name]
+    else:
+        model_config = ModelConfig.from_env() if not model_name else None
+
+    trust_remote_code = False
+    if model_config and model_config.trust_remote_code:
+        trust_remote_code = True
+    # Allow env var override
+    env_trust = os.environ.get("ENYAL_TRUST_REMOTE_CODE", "")
+    if env_trust.lower() == "true":
+        trust_remote_code = True
+
+    if trust_remote_code:
+        kwargs["trust_remote_code"] = True
+
     # Download the model (this triggers the actual download)
-    model = SentenceTransformer(model_name, cache_folder=cache_dir)
+    model = SentenceTransformer(model_name, **kwargs)
 
     # Get the actual path where it was saved
     model_path = model._model_card_vars.get("model_path", model_name)
@@ -653,8 +692,30 @@ def verify_model(model_path: str | None = None) -> bool:
 
         from sentence_transformers import SentenceTransformer
 
+        # Look up model config to get trust_remote_code
+        from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
+
+        kwargs: dict[str, object] = {}
+
+        # Check registry by path or by model name
+        model_config = MODEL_REGISTRY.get(path)
+        if model_config is None:
+            # If verifying a local path, check the default config
+            model_config = ModelConfig.from_env()
+
+        trust_remote_code = False
+        if model_config and model_config.trust_remote_code:
+            trust_remote_code = True
+        # Allow env var override
+        env_trust = os.environ.get("ENYAL_TRUST_REMOTE_CODE", "")
+        if env_trust.lower() == "true":
+            trust_remote_code = True
+
+        if trust_remote_code:
+            kwargs["trust_remote_code"] = True
+
         # Try to load the model
-        model = SentenceTransformer(path)
+        model = SentenceTransformer(path, **kwargs)
 
         # Try a simple encode to verify it works
         _ = model.encode("test", convert_to_numpy=True)

@@ -3,6 +3,7 @@
 import importlib
 import os
 import tempfile
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -198,6 +199,39 @@ class TestConfigureSSLEnvironment:
                 assert os.environ["REQUESTS_CA_BUNDLE"] == f.name
                 assert os.environ["SSL_CERT_FILE"] == f.name
                 assert os.environ["CURL_CA_BUNDLE"] == f.name
+
+    def test_disables_xet_when_cert_file_set(self) -> None:
+        """Test disables Xet storage when custom cert is configured."""
+        with tempfile.NamedTemporaryFile(suffix=".pem") as f:
+            config = SSLConfig(cert_file=f.name)
+            env = {k: v for k, v in os.environ.items()
+                   if k != "HF_HUB_DISABLE_XET"}
+            with patch.dict(os.environ, env, clear=True):
+                configure_ssl_environment(config)
+                assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+
+    def test_sets_generous_timeouts_when_cert_file_set(self) -> None:
+        """Test sets generous timeouts for corporate networks with custom cert."""
+        with tempfile.NamedTemporaryFile(suffix=".pem") as f:
+            config = SSLConfig(cert_file=f.name)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT",
+                                "HF_HUB_DISABLE_XET")}
+            with patch.dict(os.environ, env, clear=True):
+                configure_ssl_environment(config)
+                assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+                assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "60"
+
+    def test_disables_xet_when_ssl_verify_false(self) -> None:
+        """Test disables Xet storage when SSL verification is disabled."""
+        config = SSLConfig(verify=False)
+        env = {k: v for k, v in os.environ.items()
+               if k != "HF_HUB_DISABLE_XET"}
+        with patch.dict(os.environ, env, clear=True):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                configure_ssl_environment(config)
+            assert os.environ["HF_HUB_DISABLE_XET"] == "1"
 
     def test_raises_for_missing_cert_file(self) -> None:
         """Test raises FileNotFoundError for missing cert file."""
