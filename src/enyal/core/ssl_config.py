@@ -531,9 +531,23 @@ def _relax_x509_strict() -> None:
     Basic Constraints -- a common characteristic of corporate SSL inspection
     proxy CAs (Netskope, Zscaler, BlueCoat).
 
-    This function monkey-patches ``urllib3.util.ssl_.create_urllib3_context``
-    to clear the strict flag from all newly-created SSL contexts while
-    leaving certificate verification enabled.
+    **Why zeroing the constant works:**
+
+    urllib3 reads the flag via attribute access each time it creates a
+    context::
+
+        if hasattr(ssl, 'VERIFY_X509_STRICT'):
+            context.verify_flags |= ssl.VERIFY_X509_STRICT
+
+    Setting ``ssl.VERIFY_X509_STRICT = 0`` makes this a no-op
+    (``flags |= 0``), so the strict flag never reaches OpenSSL.
+
+    **Why monkey-patching functions does NOT work:**
+
+    urllib3's ``connection.py`` does ``from .util.ssl_ import
+    create_urllib3_context``, which captures a direct reference.
+    Patching ``urllib3.util.ssl_.create_urllib3_context`` does not
+    affect the already-bound reference in ``urllib3.connection``.
 
     This is less aggressive than ``_disable_ssl_globally`` and is safe to
     call proactively when using system trust stores or macOS Keychain certs.
@@ -543,30 +557,15 @@ def _relax_x509_strict() -> None:
     if not hasattr(ssl, "VERIFY_X509_STRICT"):
         return  # Python < 3.10, flag doesn't exist
 
-    try:
-        import urllib3.util.ssl_ as _urllib3_ssl
-
-        _original_create = _urllib3_ssl.create_urllib3_context
-
-        # Avoid double-wrapping if already patched
-        if getattr(_original_create, "_enyal_relaxed", False):
-            return
-
-        def _relaxed_urllib3_context(
-            *args: object, **kwargs: object
-        ) -> ssl.SSLContext:
-            ctx = _original_create(*args, **kwargs)
-            try:
-                ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-            return ctx
-
-        _relaxed_urllib3_context._enyal_relaxed = True  # type: ignore[attr-defined]
-        _urllib3_ssl.create_urllib3_context = _relaxed_urllib3_context  # type: ignore[assignment]
-        logger.debug("Relaxed X509 strict verification for corporate CA compatibility")
-    except (ImportError, AttributeError):
-        pass
+    # Zero the constant so that `context.verify_flags |= ssl.VERIFY_X509_STRICT`
+    # becomes `context.verify_flags |= 0` -- a no-op.  This works regardless
+    # of which module creates the SSL context, because urllib3 reads the
+    # constant via `ssl.VERIFY_X509_STRICT` (attribute access, not local import).
+    ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+    logger.debug(
+        "Zeroed ssl.VERIFY_X509_STRICT for corporate CA compatibility "
+        "(non-critical Basic Constraints will be accepted)"
+    )
 
 
 def _disable_ssl_globally() -> None:
@@ -579,18 +578,17 @@ def _disable_ssl_globally() -> None:
        other stdlib networking that uses ``ssl.create_default_context()``
        will skip certificate validation.
 
-    2. ``urllib3`` SSL context: Monkey-patches ``create_urllib3_context`` to
-       lower OpenSSL 3.x security level from 2 to 1.  Security level 2
-       rejects connections during the TLS handshake if the server certificate
-       uses SHA-1 signatures, small keys, or non-critical Basic Constraints
-       (common with corporate SSL inspection proxies like Netskope).  This
-       rejection happens *before* certificate verification, so ``verify=False``
-       alone cannot prevent it.
+    2. X.509 strict flag: Zeroes ``ssl.VERIFY_X509_STRICT`` so that urllib3
+       and any other consumer cannot set it on new contexts.
 
-    3. ``urllib3`` warnings: Suppresses ``InsecureRequestWarning`` to avoid
+    3. ``urllib3`` SSL context: Monkey-patches ``create_urllib3_context`` at
+       **both** ``urllib3.util.ssl_`` (the source module) and
+       ``urllib3.connection`` (where it's imported via ``from`` binding).
+
+    4. ``urllib3`` warnings: Suppresses ``InsecureRequestWarning`` to avoid
        flooding logs with warnings on every HTTPS request.
 
-    4. Environment variables: Sets ``PYTHONHTTPSVERIFY=0`` as a belt-and-
+    5. Environment variables: Sets ``PYTHONHTTPSVERIFY=0`` as a belt-and-
        suspenders measure for any subprocess or library that checks it.
 
     Warning:
@@ -600,23 +598,18 @@ def _disable_ssl_globally() -> None:
     import ssl
 
     # ── Layer 1: Python stdlib ──────────────────────────────────────────
-    # Replace the default HTTPS context factory so ALL Python SSL connections
-    # skip certificate verification.  This covers urllib, http.client, and any
-    # library that calls ssl.create_default_context().
     ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]  # noqa: SLF001
 
-    # ── Layer 2: urllib3 SSL context ────────────────────────────────────
-    # urllib3 2.x creates its own SSLContext via create_urllib3_context(),
-    # bypassing ssl._create_default_https_context entirely.  We monkey-patch
-    # that factory to lower the OpenSSL security level.
-    #
-    # OpenSSL 3.x defaults to security level 2 with PROTOCOL_TLS_CLIENT.
-    # Level 2 rejects:
-    #   - RSA keys < 2048 bits
-    #   - SHA-1 in certificate signatures (OpenSSL 3.2+)
-    #   - Non-critical Basic Constraints on CA certificates
-    # Corporate SSL inspection proxies (Netskope, Zscaler) commonly trigger
-    # these rejections.  Level 1 relaxes these requirements.
+    # ── Layer 2: Zero VERIFY_X509_STRICT ────────────────────────────────
+    # urllib3 reads `ssl.VERIFY_X509_STRICT` via attribute access, so
+    # zeroing the constant makes `context.verify_flags |= 0` a no-op.
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+
+    # ── Layer 3: urllib3 SSL context ────────────────────────────────────
+    # Monkey-patch create_urllib3_context to lower OpenSSL security level.
+    # We must patch at BOTH locations because `urllib3.connection` captures
+    # its own reference via `from .util.ssl_ import create_urllib3_context`.
     try:
         import urllib3.util.ssl_ as _urllib3_ssl
 
@@ -628,26 +621,28 @@ def _disable_ssl_globally() -> None:
             ctx = _original_create_ctx(*args, **kwargs)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            # Lower security level to allow corporate proxy certs
             try:
                 ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
             except ssl.SSLError:
-                pass  # Older OpenSSL versions without SECLEVEL support
-            # Clear VERIFY_X509_STRICT which urllib3 2.x sets for Python 3.13+.
-            # This flag causes OpenSSL to reject CA certificates with
-            # non-critical Basic Constraints (common in Netskope, Zscaler).
-            try:
-                ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
-            except AttributeError:
-                pass  # VERIFY_X509_STRICT not available in older Python
+                pass
             return ctx
 
         _urllib3_ssl.create_urllib3_context = _permissive_urllib3_context  # type: ignore[assignment]
+
+        # Also patch the direct import in urllib3.connection
+        try:
+            import urllib3.connection as _urllib3_conn
+
+            if hasattr(_urllib3_conn, "create_urllib3_context"):
+                _urllib3_conn.create_urllib3_context = _permissive_urllib3_context  # type: ignore[attr-defined]
+        except (ImportError, AttributeError):
+            pass
+
         logger.debug("Patched urllib3 SSL context factory (SECLEVEL=1)")
     except (ImportError, AttributeError) as e:
         logger.debug(f"Could not patch urllib3 SSL context: {e}")
 
-    # ── Layer 3: Suppress warnings ──────────────────────────────────────
+    # ── Layer 4: Suppress warnings ──────────────────────────────────────
     try:
         import urllib3
 
@@ -655,8 +650,7 @@ def _disable_ssl_globally() -> None:
     except ImportError:
         pass
 
-    # ── Layer 4: Environment variables ──────────────────────────────────
-    # Belt-and-suspenders: env var checked by some libraries / subprocesses
+    # ── Layer 5: Environment variables ──────────────────────────────────
     os.environ["PYTHONHTTPSVERIFY"] = "0"
 
     logger.warning("SSL verification disabled globally for this process")
@@ -1029,12 +1023,12 @@ def _preflight_ssl_check(
     port: int = 443,
     timeout: float = 10.0,
 ) -> tuple[bool, str | None]:
-    """Test SSL connectivity at the raw socket level.
+    """Test SSL connectivity simulating urllib3's behavior.
 
-    Uses Python's ``ssl`` module directly (no urllib3, no requests, no
-    caching layers) to attempt a TLS handshake with the target host.
-    This is the most reliable way to detect SSL issues before any
-    higher-level library can cache broken connections or mask errors.
+    Creates an SSL context that mirrors what urllib3 does (including
+    ``VERIFY_X509_STRICT`` if available) and tests a TLS handshake.
+    This catches corporate proxy certificate issues that only appear
+    when the strict flag is set.
 
     Args:
         host: Hostname to test.
@@ -1051,6 +1045,12 @@ def _preflight_ssl_check(
 
     try:
         ctx = ssl.create_default_context()
+
+        # Simulate urllib3 behavior: set VERIFY_X509_STRICT if available.
+        # This is the flag that causes corporate proxy CA rejection.
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
+
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host):
                 return True, None

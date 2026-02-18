@@ -1302,6 +1302,7 @@ class TestDisableSSLGloballyUrllib3Patch:
     def test_patches_urllib3_context_factory(self) -> None:
         """Test that urllib3's create_urllib3_context is monkey-patched."""
         original_ctx = ssl._create_default_https_context
+        original_strict = getattr(ssl, "VERIFY_X509_STRICT", None)
         try:
             import urllib3.util.ssl_ as _urllib3_ssl
             original_create = _urllib3_ssl.create_urllib3_context
@@ -1317,31 +1318,96 @@ class TestDisableSSLGloballyUrllib3Patch:
             assert ctx.verify_mode == ssl.CERT_NONE
         finally:
             ssl._create_default_https_context = original_ctx
-            # Restore urllib3 original
+            if original_strict is not None:
+                ssl.VERIFY_X509_STRICT = original_strict
             try:
                 _urllib3_ssl.create_urllib3_context = original_create
             except Exception:
                 pass
 
-    def test_patched_context_lowers_security_level(self) -> None:
-        """Test that the patched context uses SECLEVEL=1."""
+    def test_zeroes_verify_x509_strict(self) -> None:
+        """Test that _disable_ssl_globally zeroes VERIFY_X509_STRICT."""
+        if not hasattr(ssl, "VERIFY_X509_STRICT"):
+            pytest.skip("VERIFY_X509_STRICT not available")
+
         original_ctx = ssl._create_default_https_context
+        original_strict = ssl.VERIFY_X509_STRICT
         try:
             import urllib3.util.ssl_ as _urllib3_ssl
             original_create = _urllib3_ssl.create_urllib3_context
 
             _disable_ssl_globally()
 
-            ctx = _urllib3_ssl.create_urllib3_context()
-            # We can't directly read security level, but we can verify
-            # the context was created without errors
-            assert ctx.verify_mode == ssl.CERT_NONE
+            assert ssl.VERIFY_X509_STRICT == 0
         finally:
             ssl._create_default_https_context = original_ctx
+            ssl.VERIFY_X509_STRICT = original_strict
             try:
                 _urllib3_ssl.create_urllib3_context = original_create
             except Exception:
                 pass
+
+    def test_patches_urllib3_connection_binding(self) -> None:
+        """Test that urllib3.connection's direct import is also patched."""
+        original_ctx = ssl._create_default_https_context
+        original_strict = getattr(ssl, "VERIFY_X509_STRICT", None)
+        try:
+            import urllib3.util.ssl_ as _urllib3_ssl
+            original_create = _urllib3_ssl.create_urllib3_context
+
+            _disable_ssl_globally()
+
+            # Check if urllib3.connection was also patched
+            try:
+                import urllib3.connection as _urllib3_conn
+                if hasattr(_urllib3_conn, "create_urllib3_context"):
+                    ctx = _urllib3_conn.create_urllib3_context()
+                    assert ctx.check_hostname is False
+                    assert ctx.verify_mode == ssl.CERT_NONE
+            except (ImportError, AttributeError):
+                pass  # urllib3 version doesn't have this binding
+        finally:
+            ssl._create_default_https_context = original_ctx
+            if original_strict is not None:
+                ssl.VERIFY_X509_STRICT = original_strict
+            try:
+                _urllib3_ssl.create_urllib3_context = original_create
+            except Exception:
+                pass
+
+
+class TestRelaxX509Strict:
+    """Tests for _relax_x509_strict function."""
+
+    def test_zeroes_verify_x509_strict_constant(self) -> None:
+        """Test that _relax_x509_strict zeroes the ssl constant."""
+        from enyal.core.ssl_config import _relax_x509_strict
+
+        if not hasattr(ssl, "VERIFY_X509_STRICT"):
+            pytest.skip("VERIFY_X509_STRICT not available")
+
+        original = ssl.VERIFY_X509_STRICT
+        try:
+            # Ensure it's non-zero before the test
+            ssl.VERIFY_X509_STRICT = 0x20
+            _relax_x509_strict()
+            assert ssl.VERIFY_X509_STRICT == 0
+        finally:
+            ssl.VERIFY_X509_STRICT = original
+
+    def test_noop_without_flag(self) -> None:
+        """Test that _relax_x509_strict is a no-op when flag doesn't exist."""
+        from enyal.core.ssl_config import _relax_x509_strict
+
+        original = getattr(ssl, "VERIFY_X509_STRICT", None)
+        try:
+            if hasattr(ssl, "VERIFY_X509_STRICT"):
+                delattr(ssl, "VERIFY_X509_STRICT")
+            # Should not raise
+            _relax_x509_strict()
+        finally:
+            if original is not None:
+                ssl.VERIFY_X509_STRICT = original
 
 
 class TestSSLDiagnosticProbe:
