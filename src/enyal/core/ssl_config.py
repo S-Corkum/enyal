@@ -531,23 +531,18 @@ def _relax_x509_strict() -> None:
     Basic Constraints -- a common characteristic of corporate SSL inspection
     proxy CAs (Netskope, Zscaler, BlueCoat).
 
-    **Why zeroing the constant works:**
+    **Why we must zero the constant in TWO places:**
 
-    urllib3 reads the flag via attribute access each time it creates a
-    context::
+    urllib3's ``ssl_.py`` does ``from ssl import VERIFY_X509_STRICT`` at
+    **module load time**, capturing the integer value in its own namespace.
+    Then in ``create_urllib3_context()``::
 
-        if hasattr(ssl, 'VERIFY_X509_STRICT'):
-            context.verify_flags |= ssl.VERIFY_X509_STRICT
+        if sys.version_info >= (3, 13):
+            verify_flags |= VERIFY_X509_STRICT   # reads urllib3's OWN copy
 
-    Setting ``ssl.VERIFY_X509_STRICT = 0`` makes this a no-op
-    (``flags |= 0``), so the strict flag never reaches OpenSSL.
-
-    **Why monkey-patching functions does NOT work:**
-
-    urllib3's ``connection.py`` does ``from .util.ssl_ import
-    create_urllib3_context``, which captures a direct reference.
-    Patching ``urllib3.util.ssl_.create_urllib3_context`` does not
-    affect the already-bound reference in ``urllib3.connection``.
+    Setting only ``ssl.VERIFY_X509_STRICT = 0`` does NOT affect the
+    already-captured binding in ``urllib3.util.ssl_.VERIFY_X509_STRICT``.
+    We must zero **both** copies.
 
     This is less aggressive than ``_disable_ssl_globally`` and is safe to
     call proactively when using system trust stores or macOS Keychain certs.
@@ -557,11 +552,22 @@ def _relax_x509_strict() -> None:
     if not hasattr(ssl, "VERIFY_X509_STRICT"):
         return  # Python < 3.10, flag doesn't exist
 
-    # Zero the constant so that `context.verify_flags |= ssl.VERIFY_X509_STRICT`
-    # becomes `context.verify_flags |= 0` -- a no-op.  This works regardless
-    # of which module creates the SSL context, because urllib3 reads the
-    # constant via `ssl.VERIFY_X509_STRICT` (attribute access, not local import).
+    # ── Layer 1: Zero in the ssl module ────────────────────────────────
     ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+
+    # ── Layer 2: Zero in urllib3's module namespace ────────────────────
+    # urllib3.util.ssl_ does `from ssl import VERIFY_X509_STRICT` at import
+    # time, which captures a SEPARATE binding.  Zeroing ssl.VERIFY_X509_STRICT
+    # does NOT affect urllib3's copy.  We must patch it directly.
+    try:
+        import urllib3.util.ssl_ as _urllib3_ssl
+
+        if hasattr(_urllib3_ssl, "VERIFY_X509_STRICT"):
+            _urllib3_ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+            logger.debug("Zeroed urllib3.util.ssl_.VERIFY_X509_STRICT")
+    except (ImportError, AttributeError):
+        pass
+
     logger.debug(
         "Zeroed ssl.VERIFY_X509_STRICT for corporate CA compatibility "
         "(non-critical Basic Constraints will be accepted)"
@@ -600,11 +606,18 @@ def _disable_ssl_globally() -> None:
     # ── Layer 1: Python stdlib ──────────────────────────────────────────
     ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment]  # noqa: SLF001
 
-    # ── Layer 2: Zero VERIFY_X509_STRICT ────────────────────────────────
-    # urllib3 reads `ssl.VERIFY_X509_STRICT` via attribute access, so
-    # zeroing the constant makes `context.verify_flags |= 0` a no-op.
+    # ── Layer 2: Zero VERIFY_X509_STRICT in both ssl and urllib3 ────────
+    # urllib3 captures `VERIFY_X509_STRICT` at import time via
+    # `from ssl import VERIFY_X509_STRICT`, so we must zero BOTH copies.
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+    try:
+        import urllib3.util.ssl_ as _urllib3_ssl_mod
+
+        if hasattr(_urllib3_ssl_mod, "VERIFY_X509_STRICT"):
+            _urllib3_ssl_mod.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+    except (ImportError, AttributeError):
+        pass
 
     # ── Layer 3: urllib3 SSL context ────────────────────────────────────
     # Monkey-patch create_urllib3_context to lower OpenSSL security level.
@@ -861,12 +874,103 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
         logger.info(f"Using custom HF endpoint: {config.hf_endpoint}")
 
 
+def _build_ssl_context(
+    verify: bool = True,
+    cert_file: str | None = None,
+) -> "ssl.SSLContext":
+    """Build an SSL context that does NOT set ``VERIFY_X509_STRICT``.
+
+    ``ssl.create_default_context()`` never sets the strict flag -- only
+    urllib3's ``create_urllib3_context()`` does (on Python 3.13+).  By
+    creating the context ourselves, we avoid the strict flag entirely.
+
+    Args:
+        verify: Whether to verify certificates.
+        cert_file: Optional CA bundle path to load.
+
+    Returns:
+        An ``ssl.SSLContext`` suitable for HTTPS connections.
+    """
+    import ssl as _ssl
+
+    if not verify:
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        # On Python 3.13, check_hostname MUST be disabled before CERT_NONE
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    else:
+        ctx = _ssl.create_default_context()
+        # VERIFY_X509_STRICT is NOT set by create_default_context()
+        if cert_file:
+            ctx.load_verify_locations(cert_file)
+
+    # Lower OpenSSL security level for corporate environments (SHA-1 certs, etc.)
+    try:
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+    except _ssl.SSLError:
+        pass
+
+    return ctx
+
+
+class _CorpHTTPAdapter:
+    """Requests HTTPAdapter that injects a custom SSL context into urllib3.
+
+    This completely bypasses urllib3's ``create_urllib3_context()`` function.
+    When an ``ssl_context`` is passed to ``urllib3.PoolManager``, the pool
+    uses it directly for connections instead of calling
+    ``create_urllib3_context()``.  Since ``VERIFY_X509_STRICT`` is only set
+    inside that function, our context never has the flag, and corporate proxy
+    CAs with non-critical Basic Constraints are accepted.
+
+    This is a class factory that must be instantiated after ``requests``
+    is imported (because it inherits from ``requests.adapters.HTTPAdapter``).
+    Use ``_create_corp_adapter()`` to create instances.
+    """
+
+
+def _create_corp_adapter(ssl_context: "ssl.SSLContext") -> object:
+    """Create an HTTPAdapter subclass instance that injects the given SSL context.
+
+    This factory exists because ``requests`` may not be importable at module
+    load time.  It imports ``requests`` lazily and builds the adapter.
+
+    Args:
+        ssl_context: The SSL context to inject into urllib3 connection pools.
+
+    Returns:
+        An ``HTTPAdapter`` instance configured with the given SSL context.
+    """
+    from requests.adapters import HTTPAdapter
+
+    class _Adapter(HTTPAdapter):
+        def init_poolmanager(self, *args: object, **kwargs: object) -> object:
+            kwargs["ssl_context"] = ssl_context
+            return super().init_poolmanager(*args, **kwargs)
+
+        def proxy_manager_for(self, proxy: object, **proxy_kwargs: object) -> object:
+            proxy_kwargs["ssl_context"] = ssl_context
+            return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[arg-type]
+
+    return _Adapter()
+
+
 def configure_http_backend(config: SSLConfig | None = None) -> None:
     """
     Configure the HTTP backend for huggingface_hub with custom SSL settings.
 
     This provides more fine-grained control than environment variables by
-    configuring the requests Session directly.
+    configuring the requests Session with a custom ``HTTPAdapter`` that
+    injects a pre-built ``ssl.SSLContext`` directly into urllib3.
+
+    **Why a custom adapter is necessary:**
+
+    urllib3's ``create_urllib3_context()`` sets ``VERIFY_X509_STRICT`` on
+    Python 3.13+, which rejects corporate proxy CAs with non-critical Basic
+    Constraints.  By providing our own ``ssl.SSLContext`` (built via
+    ``ssl.create_default_context()`` which does NOT set the flag),
+    ``create_urllib3_context()`` is never called, and the strict flag is
+    never set.
 
     Args:
         config: SSLConfig to apply. If None, reads from environment.
@@ -887,9 +991,17 @@ def configure_http_backend(config: SSLConfig | None = None) -> None:
 
     import requests
 
+    # Build an SSL context WITHOUT VERIFY_X509_STRICT
+    ssl_ctx = _build_ssl_context(verify=config.verify, cert_file=config.cert_file)
+
     def create_session() -> requests.Session:
         """Create a requests session with custom SSL configuration."""
         session = requests.Session()
+
+        # Mount our adapter that injects the SSL context, completely
+        # bypassing urllib3's create_urllib3_context()
+        adapter = _create_corp_adapter(ssl_ctx)
+        session.mount("https://", adapter)
 
         # Configure SSL verification (verify=False takes highest priority)
         if not config.verify:
@@ -1018,6 +1130,12 @@ def check_ssl_health() -> dict[str, str | bool | None]:
     return result
 
 
+# OpenSSL X509_V_FLAG_X509_STRICT constant (0x20).  We hardcode this because
+# _relax_x509_strict() may have already zeroed ssl.VERIFY_X509_STRICT, and
+# the preflight check needs the REAL value to simulate urllib3's behavior.
+_OPENSSL_X509_STRICT: int = 0x20
+
+
 def _preflight_ssl_check(
     host: str = "huggingface.co",
     port: int = 443,
@@ -1029,6 +1147,12 @@ def _preflight_ssl_check(
     ``VERIFY_X509_STRICT`` if available) and tests a TLS handshake.
     This catches corporate proxy certificate issues that only appear
     when the strict flag is set.
+
+    Note:
+        Uses the hardcoded OpenSSL constant ``0x20`` for
+        ``X509_V_FLAG_X509_STRICT`` instead of reading
+        ``ssl.VERIFY_X509_STRICT``, because ``_relax_x509_strict()``
+        may have already zeroed the Python-level attribute.
 
     Args:
         host: Hostname to test.
@@ -1046,10 +1170,9 @@ def _preflight_ssl_check(
     try:
         ctx = ssl.create_default_context()
 
-        # Simulate urllib3 behavior: set VERIFY_X509_STRICT if available.
-        # This is the flag that causes corporate proxy CA rejection.
-        if hasattr(ssl, "VERIFY_X509_STRICT"):
-            ctx.verify_flags |= ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
+        # Simulate urllib3 behavior: set VERIFY_X509_STRICT using the
+        # hardcoded OpenSSL constant (not the potentially-zeroed Python attr).
+        ctx.verify_flags |= _OPENSSL_X509_STRICT
 
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host):

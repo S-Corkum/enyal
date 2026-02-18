@@ -11,8 +11,10 @@ import pytest
 
 from enyal.core.ssl_config import (
     SSLConfig,
+    _build_ssl_context,
     _convert_der_to_pem,
     _count_pem_certs,
+    _create_corp_adapter,
     _disable_ssl_globally,
     _ensure_combined_cert_bundle,
     _ensure_pem_format,
@@ -23,6 +25,7 @@ from enyal.core.ssl_config import (
     _is_ssl_error,
     _parse_bool_env,
     _preflight_ssl_check,
+    _relax_x509_strict,
     _try_inject_truststore,
     check_ssl_health,
     configure_http_backend,
@@ -1381,8 +1384,6 @@ class TestRelaxX509Strict:
 
     def test_zeroes_verify_x509_strict_constant(self) -> None:
         """Test that _relax_x509_strict zeroes the ssl constant."""
-        from enyal.core.ssl_config import _relax_x509_strict
-
         if not hasattr(ssl, "VERIFY_X509_STRICT"):
             pytest.skip("VERIFY_X509_STRICT not available")
 
@@ -1395,10 +1396,38 @@ class TestRelaxX509Strict:
         finally:
             ssl.VERIFY_X509_STRICT = original
 
+    def test_zeroes_urllib3_copy_of_constant(self) -> None:
+        """Test that _relax_x509_strict also zeroes urllib3's cached copy.
+
+        urllib3.util.ssl_ does `from ssl import VERIFY_X509_STRICT` at
+        module load time, capturing the integer value.  _relax_x509_strict
+        must zero BOTH the ssl module AND urllib3's copy.
+        """
+        if not hasattr(ssl, "VERIFY_X509_STRICT"):
+            pytest.skip("VERIFY_X509_STRICT not available")
+
+        import urllib3.util.ssl_ as _urllib3_ssl
+
+        original_ssl = ssl.VERIFY_X509_STRICT
+        original_urllib3 = getattr(_urllib3_ssl, "VERIFY_X509_STRICT", None)
+        try:
+            # Simulate the real-world state: both have the original value
+            ssl.VERIFY_X509_STRICT = 0x20
+            if original_urllib3 is not None:
+                _urllib3_ssl.VERIFY_X509_STRICT = 0x20
+
+            _relax_x509_strict()
+
+            assert ssl.VERIFY_X509_STRICT == 0
+            if original_urllib3 is not None:
+                assert _urllib3_ssl.VERIFY_X509_STRICT == 0
+        finally:
+            ssl.VERIFY_X509_STRICT = original_ssl
+            if original_urllib3 is not None:
+                _urllib3_ssl.VERIFY_X509_STRICT = original_urllib3
+
     def test_noop_without_flag(self) -> None:
         """Test that _relax_x509_strict is a no-op when flag doesn't exist."""
-        from enyal.core.ssl_config import _relax_x509_strict
-
         original = getattr(ssl, "VERIFY_X509_STRICT", None)
         try:
             if hasattr(ssl, "VERIFY_X509_STRICT"):
@@ -1529,3 +1558,118 @@ class TestPreflightSSLCheck:
 
         assert success is False
         assert "Connection refused" in err
+
+
+class TestBuildSSLContext:
+    """Tests for _build_ssl_context function."""
+
+    def test_verify_true_creates_default_context(self) -> None:
+        """Test verify=True creates a context with verification enabled."""
+        ctx = _build_ssl_context(verify=True)
+        assert ctx.check_hostname is True
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+    def test_verify_true_no_strict_flag(self) -> None:
+        """Test verify=True context does NOT have VERIFY_X509_STRICT set."""
+        if not hasattr(ssl, "VERIFY_X509_STRICT"):
+            pytest.skip("VERIFY_X509_STRICT not available")
+        # Get the real flag value from OpenSSL
+        real_flag = 0x20  # X509_V_FLAG_X509_STRICT
+        ctx = _build_ssl_context(verify=True)
+        assert not (ctx.verify_flags & real_flag), (
+            "Context should NOT have VERIFY_X509_STRICT set"
+        )
+
+    def test_verify_false_creates_insecure_context(self) -> None:
+        """Test verify=False creates a context with verification disabled."""
+        ctx = _build_ssl_context(verify=False)
+        assert ctx.check_hostname is False
+        assert ctx.verify_mode == ssl.CERT_NONE
+
+    def test_cert_file_loaded(self) -> None:
+        """Test that cert_file is loaded into the context."""
+        # Use a valid cert file (certifi bundle)
+        try:
+            import certifi
+            cert_path = certifi.where()
+        except ImportError:
+            pytest.skip("certifi not installed")
+
+        # Should not raise
+        ctx = _build_ssl_context(verify=True, cert_file=cert_path)
+        assert ctx.check_hostname is True
+
+    def test_cert_file_ignored_when_verify_false(self) -> None:
+        """Test that cert_file is ignored when verify=False."""
+        ctx = _build_ssl_context(verify=False, cert_file="/nonexistent/cert.pem")
+        assert ctx.verify_mode == ssl.CERT_NONE
+
+
+class TestCorpHTTPAdapter:
+    """Tests for _create_corp_adapter function."""
+
+    def test_creates_adapter_instance(self) -> None:
+        """Test that _create_corp_adapter returns an HTTPAdapter instance."""
+        from requests.adapters import HTTPAdapter
+
+        ctx = _build_ssl_context(verify=False)
+        adapter = _create_corp_adapter(ctx)
+        assert isinstance(adapter, HTTPAdapter)
+
+    def test_adapter_passes_ssl_context_to_poolmanager(self) -> None:
+        """Test that the adapter injects ssl_context into init_poolmanager."""
+        ctx = _build_ssl_context(verify=False)
+        adapter = _create_corp_adapter(ctx)
+
+        # Mock PoolManager at the location requests imports it from
+        with patch("requests.adapters.PoolManager") as mock_pm:
+            adapter.init_poolmanager(10, 10)
+            call_kwargs = mock_pm.call_args.kwargs
+            assert call_kwargs.get("ssl_context") is ctx
+
+
+class TestConfigureHTTPBackendAdapter:
+    """Tests for configure_http_backend with adapter injection."""
+
+    def test_session_has_https_adapter_mounted(self) -> None:
+        """Test that the session factory mounts a custom HTTPS adapter."""
+        captured_session = {}
+
+        def mock_configure(backend_factory: object) -> None:
+            captured_session["factory"] = backend_factory
+
+        mock_hf = MagicMock(configure_http_backend=mock_configure)
+        with patch.dict("sys.modules", {"huggingface_hub": mock_hf}):
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            config = SSLConfig()
+            mod.configure_http_backend(config)
+
+            session = captured_session["factory"]()
+
+            # The session should have a custom adapter on https://
+            from requests.adapters import HTTPAdapter
+
+            adapter = session.get_adapter("https://example.com")
+            assert isinstance(adapter, HTTPAdapter)
+            importlib.reload(mod)
+
+    def test_verify_false_session_has_insecure_adapter(self) -> None:
+        """Test that verify=False produces an adapter with CERT_NONE context."""
+        captured_session = {}
+
+        def mock_configure(backend_factory: object) -> None:
+            captured_session["factory"] = backend_factory
+
+        mock_hf = MagicMock(configure_http_backend=mock_configure)
+        with patch.dict("sys.modules", {"huggingface_hub": mock_hf}):
+            import enyal.core.ssl_config as mod
+
+            importlib.reload(mod)
+            config = SSLConfig(verify=False)
+            mod.configure_http_backend(config)
+
+            session = captured_session["factory"]()
+            assert session.verify is False
+            importlib.reload(mod)
