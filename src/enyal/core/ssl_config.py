@@ -523,6 +523,52 @@ def _is_ssl_error(exc: BaseException) -> bool:
     return any(p in exc_str for p in ssl_patterns)
 
 
+def _relax_x509_strict() -> None:
+    """Relax X.509 strict verification flags for corporate environments.
+
+    Python 3.13 + urllib3 2.x enables ``VERIFY_X509_STRICT`` by default.
+    This flag causes OpenSSL to reject CA certificates with non-critical
+    Basic Constraints -- a common characteristic of corporate SSL inspection
+    proxy CAs (Netskope, Zscaler, BlueCoat).
+
+    This function monkey-patches ``urllib3.util.ssl_.create_urllib3_context``
+    to clear the strict flag from all newly-created SSL contexts while
+    leaving certificate verification enabled.
+
+    This is less aggressive than ``_disable_ssl_globally`` and is safe to
+    call proactively when using system trust stores or macOS Keychain certs.
+    """
+    import ssl
+
+    if not hasattr(ssl, "VERIFY_X509_STRICT"):
+        return  # Python < 3.10, flag doesn't exist
+
+    try:
+        import urllib3.util.ssl_ as _urllib3_ssl
+
+        _original_create = _urllib3_ssl.create_urllib3_context
+
+        # Avoid double-wrapping if already patched
+        if getattr(_original_create, "_enyal_relaxed", False):
+            return
+
+        def _relaxed_urllib3_context(
+            *args: object, **kwargs: object
+        ) -> ssl.SSLContext:
+            ctx = _original_create(*args, **kwargs)
+            try:
+                ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
+            return ctx
+
+        _relaxed_urllib3_context._enyal_relaxed = True  # type: ignore[attr-defined]
+        _urllib3_ssl.create_urllib3_context = _relaxed_urllib3_context  # type: ignore[assignment]
+        logger.debug("Relaxed X509 strict verification for corporate CA compatibility")
+    except (ImportError, AttributeError):
+        pass
+
+
 def _disable_ssl_globally() -> None:
     """Disable SSL certificate verification for the entire Python process.
 
@@ -587,6 +633,13 @@ def _disable_ssl_globally() -> None:
                 ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
             except ssl.SSLError:
                 pass  # Older OpenSSL versions without SECLEVEL support
+            # Clear VERIFY_X509_STRICT which urllib3 2.x sets for Python 3.13+.
+            # This flag causes OpenSSL to reject CA certificates with
+            # non-critical Basic Constraints (common in Netskope, Zscaler).
+            try:
+                ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT  # type: ignore[attr-defined]
+            except AttributeError:
+                pass  # VERIFY_X509_STRICT not available in older Python
             return ctx
 
         _urllib3_ssl.create_urllib3_context = _permissive_urllib3_context  # type: ignore[assignment]
@@ -753,6 +806,10 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
+        # Relax X.509 strict mode for corporate CAs with
+        # non-critical Basic Constraints (Python 3.13+/urllib3)
+        _relax_x509_strict()
+
     # ── APPROACH 3 & 4: Auto-detect system trust store ───────────────────
     else:
         trust_system = _parse_bool_env("ENYAL_SSL_TRUST_SYSTEM", default=True)
@@ -765,6 +822,9 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
                 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
                 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
                 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+                # Relax X.509 strict mode for corporate CAs with
+                # non-critical Basic Constraints (Python 3.13+/urllib3)
+                _relax_x509_strict()
             else:
                 # Fallback: macOS Keychain certificate export
                 system_cert_path = _export_macos_system_certs()
@@ -777,6 +837,9 @@ def configure_ssl_environment(config: SSLConfig | None = None) -> None:
                     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
                     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
                     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+                    # Relax X.509 strict mode for corporate CAs with
+                    # non-critical Basic Constraints (Python 3.13+/urllib3)
+                    _relax_x509_strict()
                 # else: fall through to default certifi behavior
 
     # ── Common configuration (applies regardless of SSL approach) ────────
@@ -1118,7 +1181,37 @@ def download_model(
         kwargs["trust_remote_code"] = True
 
     # Download the model (this triggers the actual download)
-    model = SentenceTransformer(model_name, **kwargs)
+    # Wrapped in auto-recovery: if SSL fails, automatically disable SSL and retry
+    try:
+        model = SentenceTransformer(model_name, **kwargs)
+    except Exception as e:
+        if not _is_ssl_error(e):
+            raise
+
+        # ── SSL Auto-Recovery ───────────────────────────────────────
+        logger.warning(
+            f"SSL error during model download: {e}\n"
+            "Auto-recovering: disabling SSL verification and retrying.\n"
+            "To avoid this delay, set ENYAL_SSL_VERIFY=false or install "
+            "the 'truststore' package (pip install truststore)."
+        )
+
+        _disable_ssl_globally()
+        configure_http_backend(SSLConfig(verify=False))
+
+        # Clear cached sessions so the retry uses the new config
+        try:
+            from huggingface_hub.utils._http import reset_sessions
+
+            reset_sessions()
+        except (ImportError, AttributeError):
+            pass
+
+        model = SentenceTransformer(model_name, **kwargs)
+        logger.warning(
+            "Model downloaded successfully after SSL auto-recovery. "
+            "SSL verification was disabled for this download."
+        )
 
     # Get the actual path where it was saved
     model_path = model._model_card_vars.get("model_path", model_name)
