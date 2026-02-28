@@ -202,12 +202,12 @@ Automatically search context relevant to your current file location.
 
 ### Automatic Context Resolution
 
-The `enyal_recall_by_scope` tool automatically determines applicable scopes based on your current file:
+The `enyal_recall` tool with `file_path` automatically determines applicable scopes based on your current file:
 
     You: [Working in /Users/dev/myapp/src/api/auth.py]
         What conventions apply to this file?
 
-    Assistant: [Calls enyal_recall_by_scope with file_path="/Users/dev/myapp/src/api/auth.py"]
+    Assistant: [Calls enyal_recall with query and file_path="/Users/dev/myapp/src/api/auth.py"]
     Based on context from all applicable scopes:
 
     From file scope (/Users/dev/myapp/src/api/auth.py):
@@ -230,7 +230,7 @@ Results are weighted by specificity—file-level context ranks higher than globa
     You: [Working in /Users/dev/myapp/src/api/users.py]
         What database should I use?
 
-    Assistant: [Calls enyal_recall_by_scope with query "database"]
+    Assistant: [Calls enyal_recall with query "database" and file_path]
     For this file, you should use PostgreSQL.
 
     This comes from your project-level decision (higher priority than
@@ -242,7 +242,7 @@ When your AI assistant knows your current file, it can automatically use scope-a
 
     You: How should I handle errors here?
 
-    Assistant: [Calls enyal_recall_by_scope with current file context]
+    Assistant: [Calls enyal_recall with query and current file_path]
     Based on conventions for this project:
     - Return {error: string, code: number} format
     - Log errors to the centralized logging service

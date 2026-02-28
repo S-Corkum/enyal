@@ -4,8 +4,9 @@ FastMCP uses these to auto-generate outputSchema and structuredContent
 in MCP tool responses, giving LLMs predictable response structures.
 """
 
-from pydantic import BaseModel, Field
+from typing import Any
 
+from pydantic import BaseModel, Field
 
 # === Shared building blocks ===
 
@@ -44,7 +45,7 @@ class EdgeBrief(BaseModel):
     relation: str
     confidence: float
     created_at: str
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConflictCandidate(BaseModel):
@@ -55,7 +56,7 @@ class ConflictCandidate(BaseModel):
     similarity: float
 
 
-# === Tool responses ===
+# === Tool responses (10 tools = 10 response models) ===
 
 
 class RememberResponse(BaseModel):
@@ -72,7 +73,7 @@ class RememberResponse(BaseModel):
 
 
 class RecallResponse(BaseModel):
-    """Response from enyal_recall and enyal_recall_by_scope."""
+    """Response from enyal_recall."""
 
     success: bool
     count: int
@@ -93,42 +94,22 @@ class UpdateResponse(BaseModel):
     message: str
 
 
-class StatsResponse(BaseModel):
-    """Response from enyal_stats."""
-
-    success: bool
-    stats: dict
-
-
 class GetResponse(BaseModel):
     """Response from enyal_get."""
 
     success: bool
-    entry: dict
-    edges: dict
+    entry: dict[str, Any]
+    edges: dict[str, Any]
+    history: list[dict[str, Any]] | None = None
+    version_count: int | None = None
 
 
 class LinkResponse(BaseModel):
     """Response from enyal_link."""
 
     success: bool
-    edge_id: str
+    edge_id: str | None = None
     message: str
-
-
-class UnlinkResponse(BaseModel):
-    """Response from enyal_unlink."""
-
-    success: bool
-    message: str
-
-
-class EdgesResponse(BaseModel):
-    """Response from enyal_edges."""
-
-    success: bool
-    count: int
-    edges: list[EdgeBrief]
 
 
 class TraverseResponse(BaseModel):
@@ -137,7 +118,8 @@ class TraverseResponse(BaseModel):
     success: bool
     start_entry: EntryBrief | None = None
     count: int
-    results: list[dict]
+    results: list[dict[str, Any]]
+    edges: list[EdgeBrief] | None = None
 
 
 class ImpactResponse(BaseModel):
@@ -145,74 +127,34 @@ class ImpactResponse(BaseModel):
 
     success: bool
     target: EntryBrief | None = None
-    impact: dict
-    direct_dependencies: list[dict]
-    transitive_dependencies: list[dict]
-    related: list[dict]
+    impact: dict[str, Any]
+    direct_dependencies: list[dict[str, Any]]
+    transitive_dependencies: list[dict[str, Any]]
+    related: list[dict[str, Any]]
 
 
-class HealthResponse(BaseModel):
-    """Response from enyal_health."""
-
-    success: bool
-    health: dict
-    recommendations: list[str]
-
-
-class ReviewResponse(BaseModel):
-    """Response from enyal_review."""
+class StatusResponse(BaseModel):
+    """Response from enyal_status. Consolidates health/stats/review/analytics."""
 
     success: bool
-    stale_entries: list[dict] = Field(default_factory=list)
-    orphan_entries: list[dict] = Field(default_factory=list)
-    conflicted_entries: list[dict] = Field(default_factory=list)
+    view: str
+    stats: dict[str, Any] | None = None
+    health: dict[str, Any] | None = None
+    recommendations: list[str] | None = None
+    stale_entries: list[dict[str, Any]] = Field(default_factory=list)
+    orphan_entries: list[dict[str, Any]] = Field(default_factory=list)
+    conflicted_entries: list[dict[str, Any]] = Field(default_factory=list)
+    analytics: dict[str, Any] | None = None
 
 
-class HistoryResponse(BaseModel):
-    """Response from enyal_history."""
-
-    success: bool
-    entry_id: str
-    current_content: str
-    version_count: int
-    history: list[dict]
-
-
-class AnalyticsResponse(BaseModel):
-    """Response from enyal_analytics."""
+class TransferResponse(BaseModel):
+    """Response from enyal_transfer. Consolidates export/import."""
 
     success: bool
-    analytics: dict
-
-
-class RestoreResponse(BaseModel):
-    """Response from enyal_restore."""
-
-    success: bool
-    message: str
-
-
-class SearchTagsResponse(BaseModel):
-    """Response from enyal_search_tags."""
-
-    success: bool
-    count: int
-    results: list[EntryBrief]
-
-
-class ExportResponse(BaseModel):
-    """Response from enyal_export."""
-
-    success: bool
-    count: int
-    data: dict
-
-
-class ImportResponse(BaseModel):
-    """Response from enyal_import."""
-
-    success: bool
-    entries_imported: int
-    edges_imported: int
-    entries_skipped: int
+    direction: str
+    count: int | None = None
+    data: dict[str, Any] | None = None
+    entries_imported: int | None = None
+    edges_imported: int | None = None
+    entries_skipped: int | None = None
     message: str

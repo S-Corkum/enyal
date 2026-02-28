@@ -447,7 +447,7 @@ Create `~/.kiro/settings/mcp.json`:
         "ENYAL_DB_PATH": "${HOME}/.enyal/context.db"
       },
       "disabled": false,
-      "autoApprove": ["enyal_recall", "enyal_stats", "enyal_get"]
+      "autoApprove": ["enyal_recall", "enyal_status", "enyal_get"]
     }
   }
 }
@@ -483,7 +483,7 @@ Kiro supports additional configuration options:
         "ENYAL_DB_PATH": "${HOME}/.enyal/context.db"
       },
       "disabled": false,
-      "autoApprove": ["enyal_recall", "enyal_stats", "enyal_get"],
+      "autoApprove": ["enyal_recall", "enyal_status", "enyal_get"],
       "disabledTools": []
     }
   }

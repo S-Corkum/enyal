@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastmcp.exceptions import ToolError
+from pydantic import ValidationError
 
 from enyal.models.context import (
     ContextEntry,
@@ -149,7 +150,7 @@ class TestRememberInput:
     """Tests for RememberInput model."""
 
     def test_remember_input_defaults(self, server_module) -> None:
-        """Test RememberInput default values."""
+        """Test RememberInput default values — flipped defaults for 0.8.0."""
         input_data = server_module.RememberInput(content="Test content")
 
         assert input_data.content == "Test content"
@@ -158,6 +159,10 @@ class TestRememberInput:
         assert input_data.scope_path is None
         assert input_data.source is None
         assert input_data.tags == []
+        # Flipped defaults (was False, now True)
+        assert input_data.check_duplicate is True
+        assert input_data.auto_link is True
+        assert input_data.detect_conflicts is True
 
     def test_remember_input_all_fields(self, server_module) -> None:
         """Test RememberInput with all fields."""
@@ -180,19 +185,40 @@ class TestRememberInput:
 class TestRecallInput:
     """Tests for RecallInput model."""
 
-    def test_recall_input_defaults(self, server_module) -> None:
-        """Test RecallInput default values."""
+    def test_recall_input_with_query(self, server_module) -> None:
+        """Test RecallInput with query."""
         input_data = server_module.RecallInput(query="test query")
 
         assert input_data.query == "test query"
         assert input_data.limit == 10
         assert input_data.scope is None
-        assert input_data.scope_path is None
-        assert input_data.content_type is None
-        assert input_data.min_confidence == 0.3
+        assert input_data.file_path is None
+        assert input_data.tags is None
+
+    def test_recall_input_with_tags(self, server_module) -> None:
+        """Test RecallInput with tags only."""
+        input_data = server_module.RecallInput(tags=["python", "testing"])
+
+        assert input_data.query is None
+        assert input_data.tags == ["python", "testing"]
+        assert input_data.match_all is False
+
+    def test_recall_input_with_query_and_file_path(self, server_module) -> None:
+        """Test RecallInput with query and file_path for scope-aware search."""
+        input_data = server_module.RecallInput(
+            query="conventions",
+            file_path="/path/to/file.py",
+        )
+        assert input_data.query == "conventions"
+        assert input_data.file_path == "/path/to/file.py"
+
+    def test_recall_input_requires_query_or_tags(self, server_module) -> None:
+        """Test RecallInput validation: must provide query or tags."""
+        with pytest.raises(ValidationError, match="Must provide"):
+            server_module.RecallInput()
 
     def test_recall_input_validation(self, server_module) -> None:
-        """Test RecallInput validation."""
+        """Test RecallInput with filters."""
         input_data = server_module.RecallInput(
             query="test",
             limit=50,
@@ -233,6 +259,152 @@ class TestUpdateInput:
         assert input_data.tags is None
 
 
+class TestForgetInput:
+    """Tests for ForgetInput model."""
+
+    def test_forget_input_defaults(self, server_module) -> None:
+        """Test ForgetInput default values."""
+        input_data = server_module.ForgetInput(entry_id="test-id")
+        assert input_data.hard_delete is False
+        assert input_data.restore is False
+
+    def test_forget_input_restore_and_hard_delete_mutual_exclusion(self, server_module) -> None:
+        """Test that restore and hard_delete are mutually exclusive."""
+        with pytest.raises(ValidationError, match="Cannot use both"):
+            server_module.ForgetInput(entry_id="test-id", restore=True, hard_delete=True)
+
+
+class TestGetInput:
+    """Tests for GetInput model."""
+
+    def test_get_input_defaults(self, server_module) -> None:
+        """Test GetInput default values."""
+        input_data = server_module.GetInput(entry_id="test-id")
+        assert input_data.entry_id == "test-id"
+        assert input_data.include_history is False
+        assert input_data.history_limit == 10
+
+    def test_get_input_with_history(self, server_module) -> None:
+        """Test GetInput with history enabled."""
+        input_data = server_module.GetInput(
+            entry_id="test-id", include_history=True, history_limit=5
+        )
+        assert input_data.include_history is True
+        assert input_data.history_limit == 5
+
+
+class TestLinkInput:
+    """Tests for LinkInput model."""
+
+    def test_link_input_create_defaults(self, server_module) -> None:
+        """Test LinkInput create action defaults."""
+        input_data = server_module.LinkInput(
+            source_id="s1", target_id="t1", relation="relates_to"
+        )
+        assert input_data.action == "create"
+        assert input_data.confidence == 1.0
+        assert input_data.reason is None
+
+    def test_link_input_remove(self, server_module) -> None:
+        """Test LinkInput remove action."""
+        input_data = server_module.LinkInput(action="remove", edge_id="edge-123")
+        assert input_data.action == "remove"
+        assert input_data.edge_id == "edge-123"
+
+    def test_link_input_create_requires_fields(self, server_module) -> None:
+        """Test that create action requires source_id, target_id, relation."""
+        with pytest.raises(ValidationError, match="create action requires"):
+            server_module.LinkInput(action="create", source_id="s1")
+
+    def test_link_input_remove_requires_edge_id(self, server_module) -> None:
+        """Test that remove action requires edge_id."""
+        with pytest.raises(ValidationError, match="remove action requires"):
+            server_module.LinkInput(action="remove")
+
+
+class TestTraverseInput:
+    """Tests for TraverseInput model."""
+
+    def test_traverse_input_with_start_query(self, server_module) -> None:
+        """Test TraverseInput with start_query."""
+        input_data = server_module.TraverseInput(start_query="test")
+        assert input_data.direction == "outgoing"
+        assert input_data.max_depth == 2
+        assert input_data.relation_types is None
+
+    def test_traverse_input_with_entry_id(self, server_module) -> None:
+        """Test TraverseInput with entry_id for edge lookup."""
+        input_data = server_module.TraverseInput(entry_id="test-id", direction="both")
+        assert input_data.entry_id == "test-id"
+        assert input_data.direction == "both"
+
+    def test_traverse_input_requires_entry_id_or_start_query(self, server_module) -> None:
+        """Test validation: must provide entry_id or start_query."""
+        with pytest.raises(ValidationError, match="Must provide"):
+            server_module.TraverseInput()
+
+    def test_traverse_input_both_direction_requires_entry_id(self, server_module) -> None:
+        """Test validation: direction='both' only valid with entry_id."""
+        with pytest.raises(ValidationError, match="direction='both'"):
+            server_module.TraverseInput(start_query="test", direction="both")
+
+
+class TestStatusInput:
+    """Tests for StatusInput model."""
+
+    def test_status_input_defaults(self, server_module) -> None:
+        """Test StatusInput default values."""
+        input_data = server_module.StatusInput()
+        assert input_data.view == "summary"
+        assert input_data.category == "all"
+        assert input_data.limit == 10
+        assert input_data.days == 30
+
+    def test_status_input_analytics(self, server_module) -> None:
+        """Test StatusInput for analytics view."""
+        input_data = server_module.StatusInput(
+            view="analytics", entry_id="e1", event_type="recall", days=7
+        )
+        assert input_data.view == "analytics"
+        assert input_data.entry_id == "e1"
+        assert input_data.event_type == "recall"
+        assert input_data.days == 7
+
+
+class TestTransferInput:
+    """Tests for TransferInput model."""
+
+    def test_transfer_input_export(self, server_module) -> None:
+        """Test TransferInput export direction."""
+        input_data = server_module.TransferInput(direction="export")
+        assert input_data.direction == "export"
+        assert input_data.scope is None
+
+    def test_transfer_input_import_requires_data(self, server_module) -> None:
+        """Test that import direction requires data."""
+        with pytest.raises(ValidationError, match="import direction requires"):
+            server_module.TransferInput(direction="import")
+
+    def test_transfer_input_import_with_data(self, server_module) -> None:
+        """Test TransferInput import with data."""
+        input_data = server_module.TransferInput(
+            direction="import", data={"entries": [], "edges": []}
+        )
+        assert input_data.direction == "import"
+        assert input_data.data is not None
+
+
+class TestImpactInput:
+    """Tests for ImpactInput model."""
+
+    def test_impact_input_defaults(self, server_module) -> None:
+        """Test ImpactInput default values."""
+        input_data = server_module.ImpactInput()
+        assert input_data.entry_id is None
+        assert input_data.query is None
+        assert input_data.max_depth == 3
+
+
 class TestEnyalRemember:
     """Tests for enyal_remember tool."""
 
@@ -261,7 +433,7 @@ class TestEnyalRemember:
             assert hasattr(result, "message")
 
     def test_enyal_remember_with_all_options(self, server_module) -> None:
-        """Test remember with all options."""
+        """Test remember with all options — verifies flipped defaults."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
             mock_store.remember.return_value = {
@@ -292,17 +464,17 @@ class TestEnyalRemember:
                 source_type="conversation",
                 source_ref="session-abc",
                 tags=["important", "architecture"],
-                check_duplicate=False,
+                check_duplicate=True,  # Flipped default
                 duplicate_threshold=0.85,
                 on_duplicate="reject",
                 # Graph parameters
-                auto_link=False,
+                auto_link=True,  # Flipped default
                 auto_link_threshold=0.85,
                 relates_to=None,
                 supersedes=None,
                 depends_on=None,
                 # Conflict/supersedes detection
-                detect_conflicts=False,
+                detect_conflicts=True,  # Flipped default
                 suggest_supersedes=False,
                 auto_supersede=False,
             )
@@ -321,10 +493,10 @@ class TestEnyalRemember:
 
 
 class TestEnyalRecall:
-    """Tests for enyal_recall tool."""
+    """Tests for enyal_recall tool — covers all 3 modes."""
 
-    def test_enyal_recall_success(self, server_module, sample_entry: ContextEntry) -> None:
-        """Test successful recall operation."""
+    def test_enyal_recall_semantic_search(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test standard semantic search (query only)."""
         mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
 
         with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
@@ -332,14 +504,95 @@ class TestEnyalRecall:
             mock_retrieval.search.return_value = [mock_result]
             mock_get_retrieval.return_value = mock_retrieval
 
-            input_data = server_module.RecallInput(query="test query")
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(query="test query")
 
-            result = server_module.enyal_recall(input_data)
+                result = server_module.enyal_recall(input_data)
 
-            assert result.success is True
-            assert result.count == 1
-            assert len(result.results) == 1
-            assert result.results[0].content == "Test content for unit tests"
+                assert result.success is True
+                assert result.count == 1
+                assert len(result.results) == 1
+                assert result.results[0].content == "Test content for unit tests"
+
+    def test_enyal_recall_scope_aware(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test scope-aware search (query + file_path)."""
+        mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
+
+        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
+            mock_retrieval = MagicMock()
+            mock_retrieval.search_by_scope.return_value = [mock_result]
+            mock_get_retrieval.return_value = mock_retrieval
+
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(
+                    query="test query",
+                    file_path="/path/to/file.py",
+                )
+
+                result = server_module.enyal_recall(input_data)
+
+                assert result.success is True
+                assert result.count == 1
+                mock_retrieval.search_by_scope.assert_called_once()
+
+    def test_enyal_recall_tags_only(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test tag-only search."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.search_by_tags.return_value = [sample_entry]
+            mock_get_store.return_value = mock_store
+
+            with patch.object(server_module, "get_retrieval"):
+                input_data = server_module.RecallInput(tags=["test", "sample"])
+
+                result = server_module.enyal_recall(input_data)
+
+                assert result.success is True
+                assert result.count == 1
+                mock_store.search_by_tags.assert_called_once_with(
+                    tags=["test", "sample"], match_all=False, limit=10
+                )
+
+    def test_enyal_recall_query_and_tags_post_filter(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test query + tags: semantic search with tag post-filtering."""
+        mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
+
+        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = [mock_result]
+            mock_get_retrieval.return_value = mock_retrieval
+
+            with patch.object(server_module, "get_store"):
+                # sample_entry has tags ["test", "sample"]
+                input_data = server_module.RecallInput(
+                    query="test query",
+                    tags=["test"],
+                )
+
+                result = server_module.enyal_recall(input_data)
+
+                assert result.success is True
+                assert result.count == 1  # Kept because entry has "test" tag
+
+    def test_enyal_recall_query_and_tags_filter_out(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test query + tags: entry filtered out when tags don't match."""
+        mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
+
+        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
+            mock_retrieval = MagicMock()
+            mock_retrieval.search.return_value = [mock_result]
+            mock_get_retrieval.return_value = mock_retrieval
+
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(
+                    query="test query",
+                    tags=["nonexistent-tag"],
+                )
+
+                result = server_module.enyal_recall(input_data)
+
+                assert result.success is True
+                assert result.count == 0  # Filtered out
 
     def test_enyal_recall_with_filters(self, server_module, sample_entry: ContextEntry) -> None:
         """Test recall with filters."""
@@ -350,29 +603,29 @@ class TestEnyalRecall:
             mock_retrieval.search.return_value = [mock_result]
             mock_get_retrieval.return_value = mock_retrieval
 
-            input_data = server_module.RecallInput(
-                query="test query",
-                limit=5,
-                scope="project",
-                content_type="fact",
-                min_confidence=0.5,
-            )
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(
+                    query="test query",
+                    limit=5,
+                    scope="project",
+                    content_type="fact",
+                    min_confidence=0.5,
+                )
 
-            result = server_module.enyal_recall(input_data)
+                result = server_module.enyal_recall(input_data)
 
-            assert result.success is True
-            mock_retrieval.search.assert_called_once_with(
-                query="test query",
-                limit=5,
-                scope_level=ScopeLevel.PROJECT,
-                scope_path=None,
-                content_type=ContextType.FACT,
-                min_confidence=0.5,
-                # Validity parameters
-                exclude_superseded=True,
-                flag_conflicts=True,
-                freshness_boost=0.1,
-            )
+                assert result.success is True
+                mock_retrieval.search.assert_called_once_with(
+                    query="test query",
+                    limit=5,
+                    scope_level=ScopeLevel.PROJECT,
+                    scope_path=None,
+                    content_type=ContextType.FACT,
+                    min_confidence=0.5,
+                    exclude_superseded=True,
+                    flag_conflicts=True,
+                    freshness_boost=0.1,
+                )
 
     def test_enyal_recall_empty_results(self, server_module) -> None:
         """Test recall with no results."""
@@ -381,13 +634,14 @@ class TestEnyalRecall:
             mock_retrieval.search.return_value = []
             mock_get_retrieval.return_value = mock_retrieval
 
-            input_data = server_module.RecallInput(query="nonexistent query")
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(query="nonexistent query")
 
-            result = server_module.enyal_recall(input_data)
+                result = server_module.enyal_recall(input_data)
 
-            assert result.success is True
-            assert result.count == 0
-            assert result.results == []
+                assert result.success is True
+                assert result.count == 0
+                assert result.results == []
 
     def test_enyal_recall_error(self, server_module) -> None:
         """Test recall operation with error."""
@@ -396,10 +650,94 @@ class TestEnyalRecall:
             mock_retrieval.search.side_effect = Exception("Search error")
             mock_get_retrieval.return_value = mock_retrieval
 
-            input_data = server_module.RecallInput(query="test query")
+            with patch.object(server_module, "get_store"):
+                input_data = server_module.RecallInput(query="test query")
 
-            with pytest.raises(Exception, match="Search error"):
-                server_module.enyal_recall(input_data)
+                with pytest.raises(Exception, match="Search error"):
+                    server_module.enyal_recall(input_data)
+
+
+class TestEnyalGet:
+    """Tests for enyal_get tool."""
+
+    def test_enyal_get_success(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test successful get operation."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get.return_value = sample_entry
+            mock_store.get_edges.return_value = []
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.GetInput(entry_id="test-entry-id")
+            result = server_module.enyal_get(input_data)
+
+            assert result.success is True
+            assert result.entry is not None
+            assert result.entry["content"] == "Test content for unit tests"
+            assert result.entry["type"] == "fact"
+            assert result.history is None
+
+    def test_enyal_get_with_history(self, server_module, sample_entry: ContextEntry) -> None:
+        """Test get with include_history=True."""
+        history_records = [
+            {"version": 1, "content": "Original", "change_type": "created"}
+        ]
+
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get.return_value = sample_entry
+            mock_store.get_edges.return_value = []
+            mock_store.get_history.return_value = history_records
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.GetInput(
+                entry_id="test-entry-id", include_history=True
+            )
+            result = server_module.enyal_get(input_data)
+
+            assert result.success is True
+            assert result.history == history_records
+            assert result.version_count == 1
+            mock_store.get_history.assert_called_once_with("test-entry-id", limit=10)
+
+    def test_enyal_get_with_source(
+        self, server_module, sample_entry_with_source: ContextEntry
+    ) -> None:
+        """Test get with entry that has source information."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get.return_value = sample_entry_with_source
+            mock_store.get_edges.return_value = []
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.GetInput(entry_id="test-entry-id")
+            result = server_module.enyal_get(input_data)
+
+            assert result.success is True
+            assert result.entry["source_type"] == "conversation"
+            assert result.entry["source_ref"] == "session-123"
+
+    def test_enyal_get_not_found(self, server_module) -> None:
+        """Test get when entry not found."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get.return_value = None
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.GetInput(entry_id="nonexistent-id")
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_get(input_data)
+
+    def test_enyal_get_error(self, server_module) -> None:
+        """Test get operation with error."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get.side_effect = Exception("Database error")
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.GetInput(entry_id="test-id")
+            with pytest.raises(Exception, match="Database error"):
+                server_module.enyal_get(input_data)
 
 
 class TestEnyalForget:
@@ -434,6 +772,33 @@ class TestEnyalForget:
             assert result.success is True
             assert "permanently deleted" in result.message
             mock_store.forget.assert_called_once_with("test-entry-id", hard_delete=True)
+
+    def test_enyal_forget_restore(self, server_module) -> None:
+        """Test forget with restore=True."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.restore.return_value = True
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.ForgetInput(entry_id="test-entry-id", restore=True)
+
+            result = server_module.enyal_forget(input_data)
+
+            assert result.success is True
+            assert "restored" in result.message
+            mock_store.restore.assert_called_once_with("test-entry-id")
+
+    def test_enyal_forget_restore_not_found(self, server_module) -> None:
+        """Test restore when entry not found or not deprecated."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.restore.return_value = False
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.ForgetInput(entry_id="test-id", restore=True)
+
+            with pytest.raises(ToolError, match="not found or not deprecated"):
+                server_module.enyal_forget(input_data)
 
     def test_enyal_forget_not_found(self, server_module) -> None:
         """Test forget when entry not found."""
@@ -511,129 +876,6 @@ class TestEnyalUpdate:
 
             with pytest.raises(Exception, match="Update error"):
                 server_module.enyal_update(input_data)
-
-
-class TestEnyalStats:
-    """Tests for enyal_stats tool."""
-
-    def test_enyal_stats_success(self, server_module, sample_stats: ContextStats) -> None:
-        """Test successful stats operation."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.stats.return_value = sample_stats
-            mock_get_store.return_value = mock_store
-
-            result = server_module.enyal_stats()
-
-            assert result.success is True
-            assert result.stats is not None
-            assert result.stats["total_entries"] == 100
-            assert result.stats["active_entries"] == 90
-            assert result.stats["deprecated_entries"] == 10
-
-    def test_enyal_stats_error(self, server_module) -> None:
-        """Test stats operation with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.stats.side_effect = Exception("Stats error")
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(Exception, match="Stats error"):
-                server_module.enyal_stats()
-
-
-class TestEnyalGet:
-    """Tests for enyal_get tool."""
-
-    def test_enyal_get_success(self, server_module, sample_entry: ContextEntry) -> None:
-        """Test successful get operation."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get.return_value = sample_entry
-            mock_store.get_edges.return_value = []
-            mock_get_store.return_value = mock_store
-
-            result = server_module.enyal_get("test-entry-id")
-
-            assert result.success is True
-            assert result.entry is not None
-            assert result.entry["content"] == "Test content for unit tests"
-            assert result.entry["type"] == "fact"
-
-    def test_enyal_get_with_source(
-        self, server_module, sample_entry_with_source: ContextEntry
-    ) -> None:
-        """Test get with entry that has source information."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get.return_value = sample_entry_with_source
-            mock_store.get_edges.return_value = []
-            mock_get_store.return_value = mock_store
-
-            result = server_module.enyal_get("test-entry-id")
-
-            assert result.success is True
-            assert result.entry["source_type"] == "conversation"
-            assert result.entry["source_ref"] == "session-123"
-
-    def test_enyal_get_not_found(self, server_module) -> None:
-        """Test get when entry not found."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get.return_value = None
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(ToolError, match="not found"):
-                server_module.enyal_get("nonexistent-id")
-
-    def test_enyal_get_error(self, server_module) -> None:
-        """Test get operation with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get.side_effect = Exception("Database error")
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(Exception, match="Database error"):
-                server_module.enyal_get("test-id")
-
-
-class TestEnyalRecallByScope:
-    """Tests for enyal_recall_by_scope tool."""
-
-    def test_enyal_recall_by_scope_success(self, server_module, sample_entry: ContextEntry) -> None:
-        """Test successful recall by scope operation."""
-        mock_result = ContextSearchResult(entry=sample_entry, distance=0.25, score=0.8)
-
-        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
-            mock_retrieval = MagicMock()
-            mock_retrieval.search_by_scope.return_value = [mock_result]
-            mock_get_retrieval.return_value = mock_retrieval
-
-            input_data = server_module.RecallByScopeInput(
-                query="test query",
-                file_path="/path/to/file.py",
-            )
-
-            result = server_module.enyal_recall_by_scope(input_data)
-
-            assert result.success is True
-            assert result.count == 1
-            mock_retrieval.search_by_scope.assert_called_once()
-
-    def test_enyal_recall_by_scope_error(self, server_module) -> None:
-        """Test recall by scope with error."""
-        with patch.object(server_module, "get_retrieval") as mock_get_retrieval:
-            mock_retrieval = MagicMock()
-            mock_retrieval.search_by_scope.side_effect = Exception("Scope error")
-            mock_get_retrieval.return_value = mock_retrieval
-
-            input_data = server_module.RecallByScopeInput(
-                query="test",
-                file_path="/path/to/file.py",
-            )
-
-            with pytest.raises(Exception, match="Scope error"):
-                server_module.enyal_recall_by_scope(input_data)
 
 
 class TestEnyalRememberDedup:
@@ -770,7 +1012,7 @@ class TestEnyalRememberMerged:
 class TestEnyalLink:
     """Tests for enyal_link tool."""
 
-    def test_enyal_link_success(self, server_module) -> None:
+    def test_enyal_link_create_success(self, server_module) -> None:
         """Test successful link creation."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
@@ -791,7 +1033,7 @@ class TestEnyalLink:
             assert result.edge_id == "edge-123"
             assert "relates_to" in result.message
 
-    def test_enyal_link_failure(self, server_module) -> None:
+    def test_enyal_link_create_failure(self, server_module) -> None:
         """Test link when entries don't exist."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
@@ -805,6 +1047,32 @@ class TestEnyalLink:
             )
 
             with pytest.raises(ToolError):
+                server_module.enyal_link(input_data)
+
+    def test_enyal_link_remove_success(self, server_module) -> None:
+        """Test successful link removal."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.unlink.return_value = True
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.LinkInput(action="remove", edge_id="edge-123")
+
+            result = server_module.enyal_link(input_data)
+
+            assert result.success is True
+            assert "edge-123" in result.message
+
+    def test_enyal_link_remove_not_found(self, server_module) -> None:
+        """Test link remove when edge not found."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.unlink.return_value = False
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.LinkInput(action="remove", edge_id="nonexistent")
+
+            with pytest.raises(ToolError, match="not found"):
                 server_module.enyal_link(input_data)
 
     def test_enyal_link_no_reason(self, server_module) -> None:
@@ -824,14 +1092,11 @@ class TestEnyalLink:
 
             assert result.success is True
             mock_store.link.assert_called_once()
-            # metadata should be empty dict when no reason
             call_kwargs = mock_store.link.call_args
             assert call_kwargs[1]["metadata"] == {}
 
     def test_enyal_link_value_error(self, server_module) -> None:
         """Test link with invalid relation type raises validation error."""
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             server_module.LinkInput(
                 source_id="entry-1",
@@ -856,110 +1121,11 @@ class TestEnyalLink:
                 server_module.enyal_link(input_data)
 
 
-class TestEnyalUnlink:
-    """Tests for enyal_unlink tool."""
-
-    def test_enyal_unlink_success(self, server_module) -> None:
-        """Test successful unlink."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.unlink.return_value = True
-            mock_get_store.return_value = mock_store
-
-            result = server_module.enyal_unlink("edge-123")
-
-            assert result.success is True
-            assert "edge-123" in result.message
-
-    def test_enyal_unlink_not_found(self, server_module) -> None:
-        """Test unlink when edge not found."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.unlink.return_value = False
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(ToolError, match="not found"):
-                server_module.enyal_unlink("nonexistent-edge")
-
-    def test_enyal_unlink_error(self, server_module) -> None:
-        """Test unlink with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.unlink.side_effect = Exception("Unlink error")
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(Exception, match="Unlink error"):
-                server_module.enyal_unlink("edge-123")
-
-
-class TestEnyalEdges:
-    """Tests for enyal_edges tool."""
-
-    def test_enyal_edges_success(self, server_module, sample_edge) -> None:
-        """Test successful edges retrieval."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_edges.return_value = [sample_edge]
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.EdgesInput(
-                entry_id="test-entry",
-                direction="both",
-            )
-
-            result = server_module.enyal_edges(input_data)
-
-            assert result.success is True
-            assert result.count == 1
-            assert len(result.edges) == 1
-            assert result.edges[0].relation == "relates_to"
-
-    def test_enyal_edges_with_filter(self, server_module) -> None:
-        """Test edges with relation type filter."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_edges.return_value = []
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.EdgesInput(
-                entry_id="test-entry",
-                direction="outgoing",
-                relation_type="supersedes",
-            )
-
-            result = server_module.enyal_edges(input_data)
-
-            assert result.success is True
-            assert result.count == 0
-
-    def test_enyal_edges_value_error(self, server_module) -> None:
-        """Test edges with invalid direction raises validation error."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            server_module.EdgesInput(
-                entry_id="test-entry",
-                direction="invalid",
-            )
-
-    def test_enyal_edges_error(self, server_module) -> None:
-        """Test edges with unexpected error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_edges.side_effect = RuntimeError("DB error")
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.EdgesInput(entry_id="test-entry")
-
-            with pytest.raises(RuntimeError, match="DB error"):
-                server_module.enyal_edges(input_data)
-
-
 class TestEnyalTraverse:
-    """Tests for enyal_traverse tool."""
+    """Tests for enyal_traverse tool — covers traversal and edge lookup modes."""
 
     def test_enyal_traverse_success(self, server_module, sample_entry) -> None:
-        """Test successful graph traversal."""
+        """Test successful graph traversal via start_query."""
         mock_search_result = ContextSearchResult(
             entry=sample_entry, distance=0.1, score=0.95
         )
@@ -993,6 +1159,46 @@ class TestEnyalTraverse:
             assert result.success is True
             assert result.start_entry is not None
             assert result.count == 1
+            assert result.edges is None  # Not in traversal mode
+
+    def test_enyal_traverse_edge_lookup(self, server_module, sample_edge) -> None:
+        """Test direct edge lookup via entry_id."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get_edges.return_value = [sample_edge]
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.TraverseInput(
+                entry_id="test-entry",
+                direction="both",
+            )
+
+            result = server_module.enyal_traverse(input_data)
+
+            assert result.success is True
+            assert result.count == 1
+            assert result.edges is not None
+            assert len(result.edges) == 1
+            assert result.edges[0].relation == "relates_to"
+            assert result.results == []  # No traversal results
+
+    def test_enyal_traverse_edge_lookup_with_filter(self, server_module) -> None:
+        """Test edge lookup with relation type filter."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.get_edges.return_value = []
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.TraverseInput(
+                entry_id="test-entry",
+                direction="outgoing",
+                relation_type="supersedes",
+            )
+
+            result = server_module.enyal_traverse(input_data)
+
+            assert result.success is True
+            assert result.count == 0
 
     def test_enyal_traverse_no_start(self, server_module) -> None:
         """Test traverse when no starting entry found."""
@@ -1038,8 +1244,6 @@ class TestEnyalTraverse:
 
     def test_enyal_traverse_value_error(self, server_module, sample_entry) -> None:
         """Test traverse with invalid relation type raises validation error."""
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             server_module.TraverseInput(
                 start_query="test",
@@ -1126,8 +1330,6 @@ class TestEnyalImpact:
         ):
             mock_store = MagicMock()
             mock_store.get.return_value = sample_entry
-            # First traverse call: depends_on (direct dep at depth 1)
-            # Second traverse call: relates_to (related at confidence 0.9)
             mock_store.traverse.side_effect = [
                 [{"entry": dep_entry, "depth": 1, "edge_type": "depends_on", "confidence": 1.0}],
                 [{"entry": dep_entry, "depth": 1, "edge_type": "relates_to", "confidence": 0.9}],
@@ -1197,45 +1399,6 @@ class TestEnyalImpact:
 
             with pytest.raises(RuntimeError, match="DB error"):
                 server_module.enyal_impact(input_data)
-
-
-class TestEnyalHealth:
-    """Tests for enyal_health tool."""
-
-    def test_enyal_health_success(self, server_module) -> None:
-        """Test successful health check."""
-        health_data = {
-            "total_entries": 50,
-            "total_edges": 20,
-            "superseded_entries": 2,
-            "unresolved_conflicts": 0,
-            "stale_entries": 5,
-            "orphan_entries": 10,
-            "low_confidence_entries": 3,
-            "never_accessed_entries": 8,
-            "health_score": 0.85,
-        }
-
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.health_check.return_value = health_data
-            mock_get_store.return_value = mock_store
-
-            result = server_module.enyal_health()
-
-            assert result.success is True
-            assert result.health == health_data
-            assert result.recommendations is not None
-
-    def test_enyal_health_error(self, server_module) -> None:
-        """Test health check with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.health_check.side_effect = Exception("Health error")
-            mock_get_store.return_value = mock_store
-
-            with pytest.raises(Exception, match="Health error"):
-                server_module.enyal_health()
 
 
 class TestGetHealthRecommendations:
@@ -1332,11 +1495,62 @@ class TestGetHealthRecommendations:
         assert any("maintenance" in r for r in result)
 
 
-class TestEnyalReview:
-    """Tests for enyal_review tool."""
+class TestEnyalStatus:
+    """Tests for enyal_status tool — covers all 4 views."""
 
-    def test_enyal_review_all(self, server_module, sample_entry) -> None:
-        """Test review with all categories."""
+    def test_enyal_status_summary(self, server_module, sample_stats: ContextStats) -> None:
+        """Test summary view."""
+        health_data = {
+            "total_entries": 50,
+            "superseded_entries": 2,
+            "unresolved_conflicts": 0,
+            "stale_entries": 5,
+            "orphan_entries": 10,
+            "health_score": 0.85,
+        }
+
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.stats.return_value = sample_stats
+            mock_store.health_check.return_value = health_data
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.StatusInput(view="summary")
+            result = server_module.enyal_status(input_data)
+
+            assert result.success is True
+            assert result.view == "summary"
+            assert result.stats is not None
+            assert result.stats["total_entries"] == 100
+            assert result.health is not None
+            assert result.recommendations is not None
+
+    def test_enyal_status_health(self, server_module) -> None:
+        """Test health view."""
+        health_data = {
+            "total_entries": 50,
+            "superseded_entries": 2,
+            "unresolved_conflicts": 0,
+            "stale_entries": 5,
+            "orphan_entries": 10,
+            "health_score": 0.85,
+        }
+
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.health_check.return_value = health_data
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.StatusInput(view="health")
+            result = server_module.enyal_status(input_data)
+
+            assert result.success is True
+            assert result.view == "health"
+            assert result.health == health_data
+            assert result.recommendations is not None
+
+    def test_enyal_status_review_all(self, server_module, sample_entry) -> None:
+        """Test review view with all categories."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
             mock_store.get_stale_entries.return_value = [sample_entry]
@@ -1346,136 +1560,31 @@ class TestEnyalReview:
             ]
             mock_get_store.return_value = mock_store
 
-            input_data = server_module.ReviewInput(category="all", limit=10)
-
-            result = server_module.enyal_review(input_data)
+            input_data = server_module.StatusInput(view="review", category="all", limit=10)
+            result = server_module.enyal_status(input_data)
 
             assert result.success is True
-            assert result.stale_entries is not None
-            assert result.orphan_entries is not None
-            assert result.conflicted_entries is not None
+            assert result.view == "review"
+            assert len(result.stale_entries) > 0
+            assert len(result.orphan_entries) > 0
+            assert len(result.conflicted_entries) > 0
 
-    def test_enyal_review_stale(self, server_module, sample_entry) -> None:
-        """Test review stale category only."""
+    def test_enyal_status_review_stale(self, server_module, sample_entry) -> None:
+        """Test review view with stale category only."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
             mock_store.get_stale_entries.return_value = [sample_entry]
             mock_get_store.return_value = mock_store
 
-            input_data = server_module.ReviewInput(category="stale")
-
-            result = server_module.enyal_review(input_data)
+            input_data = server_module.StatusInput(view="review", category="stale")
+            result = server_module.enyal_status(input_data)
 
             assert result.success is True
             assert len(result.stale_entries) > 0
             assert result.orphan_entries == []
 
-    def test_enyal_review_orphan(self, server_module, sample_entry) -> None:
-        """Test review orphan category only."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_orphan_entries.return_value = []
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.ReviewInput(category="orphan")
-
-            result = server_module.enyal_review(input_data)
-
-            assert result.success is True
-            assert result.orphan_entries is not None
-            assert result.stale_entries == []
-
-    def test_enyal_review_conflicts(self, server_module, sample_entry) -> None:
-        """Test review conflicts category."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_conflicted_entries.return_value = []
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.ReviewInput(category="conflicts")
-
-            result = server_module.enyal_review(input_data)
-
-            assert result.success is True
-            assert result.conflicted_entries is not None
-
-    def test_enyal_review_error(self, server_module) -> None:
-        """Test review with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_stale_entries.side_effect = Exception("Review error")
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.ReviewInput(category="all")
-
-            with pytest.raises(Exception, match="Review error"):
-                server_module.enyal_review(input_data)
-
-
-class TestEnyalHistory:
-    """Tests for enyal_history tool."""
-
-    def test_enyal_history_success(self, server_module, sample_entry) -> None:
-        """Test successful history retrieval."""
-        history_records = [
-            {
-                "version_id": "v1",
-                "version": 1,
-                "content": "Original content",
-                "content_type": "fact",
-                "confidence": 0.9,
-                "tags": [],
-                "changed_at": "2024-01-01T00:00:00",
-                "change_type": "created",
-                "metadata": {},
-            }
-        ]
-
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_history.return_value = history_records
-            mock_store.get.return_value = sample_entry
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.HistoryInput(entry_id="test-entry-id")
-
-            result = server_module.enyal_history(input_data)
-
-            assert result.success is True
-            assert result.entry_id == "test-entry-id"
-            assert result.version_count == 1
-
-    def test_enyal_history_not_found(self, server_module) -> None:
-        """Test history when entry not found."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_history.return_value = []
-            mock_store.get.return_value = None
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.HistoryInput(entry_id="nonexistent-id")
-
-            with pytest.raises(ToolError, match="not found"):
-                server_module.enyal_history(input_data)
-
-    def test_enyal_history_error(self, server_module) -> None:
-        """Test history with error."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get.side_effect = Exception("History error")
-            mock_get_store.return_value = mock_store
-
-            input_data = server_module.HistoryInput(entry_id="test-id")
-
-            with pytest.raises(Exception, match="History error"):
-                server_module.enyal_history(input_data)
-
-
-class TestEnyalAnalytics:
-    """Tests for enyal_analytics tool."""
-
-    def test_enyal_analytics_success(self, server_module) -> None:
-        """Test successful analytics retrieval."""
+    def test_enyal_status_analytics(self, server_module) -> None:
+        """Test analytics view."""
         analytics_data = {
             "period_days": 30,
             "events_by_type": [],
@@ -1487,27 +1596,24 @@ class TestEnyalAnalytics:
             mock_store.get_analytics.return_value = analytics_data
             mock_get_store.return_value = mock_store
 
-            input_data = server_module.AnalyticsInput(days=30)
-
-            result = server_module.enyal_analytics(input_data)
+            input_data = server_module.StatusInput(view="analytics", days=30)
+            result = server_module.enyal_status(input_data)
 
             assert result.success is True
+            assert result.view == "analytics"
             assert result.analytics == analytics_data
 
-    def test_enyal_analytics_with_filters(self, server_module) -> None:
-        """Test analytics with entry_id and event_type filters."""
+    def test_enyal_status_analytics_with_filters(self, server_module) -> None:
+        """Test analytics view with filters."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
-            mock_store.get_analytics.return_value = {"period_days": 7, "events_by_type": [], "top_recalled": []}
+            mock_store.get_analytics.return_value = {"period_days": 7}
             mock_get_store.return_value = mock_store
 
-            input_data = server_module.AnalyticsInput(
-                entry_id="specific-entry",
-                event_type="recall",
-                days=7,
+            input_data = server_module.StatusInput(
+                view="analytics", entry_id="specific-entry", event_type="recall", days=7
             )
-
-            result = server_module.enyal_analytics(input_data)
+            result = server_module.enyal_status(input_data)
 
             assert result.success is True
             mock_store.get_analytics.assert_called_once_with(
@@ -1516,17 +1622,92 @@ class TestEnyalAnalytics:
                 days=7,
             )
 
-    def test_enyal_analytics_error(self, server_module) -> None:
-        """Test analytics with error."""
+    def test_enyal_status_error(self, server_module) -> None:
+        """Test status with error."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
-            mock_store.get_analytics.side_effect = Exception("Analytics error")
+            mock_store.stats.side_effect = Exception("Stats error")
             mock_get_store.return_value = mock_store
 
-            input_data = server_module.AnalyticsInput()
+            input_data = server_module.StatusInput(view="summary")
 
-            with pytest.raises(Exception, match="Analytics error"):
-                server_module.enyal_analytics(input_data)
+            with pytest.raises(Exception, match="Stats error"):
+                server_module.enyal_status(input_data)
+
+
+class TestEnyalTransfer:
+    """Tests for enyal_transfer tool."""
+
+    def test_enyal_transfer_export(self, server_module) -> None:
+        """Test export direction."""
+        export_data = {"entries": [{"id": "e1"}], "edges": []}
+
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.export_entries.return_value = export_data
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.TransferInput(direction="export")
+            result = server_module.enyal_transfer(input_data)
+
+            assert result.success is True
+            assert result.direction == "export"
+            assert result.count == 1
+            assert result.data == export_data
+
+    def test_enyal_transfer_export_with_filters(self, server_module) -> None:
+        """Test export with scope filters."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.export_entries.return_value = {"entries": [], "edges": []}
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.TransferInput(
+                direction="export", scope="project", include_deprecated=True
+            )
+            result = server_module.enyal_transfer(input_data)
+
+            assert result.success is True
+            mock_store.export_entries.assert_called_once_with(
+                scope_level=ScopeLevel.PROJECT,
+                scope_path=None,
+                include_deprecated=True,
+            )
+
+    def test_enyal_transfer_import(self, server_module) -> None:
+        """Test import direction."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.import_entries.return_value = {
+                "entries_imported": 5,
+                "edges_imported": 3,
+                "entries_skipped": 1,
+            }
+            mock_get_store.return_value = mock_store
+
+            import_data = {"entries": [{"id": "e1"}], "edges": []}
+            input_data = server_module.TransferInput(
+                direction="import", data=import_data
+            )
+            result = server_module.enyal_transfer(input_data)
+
+            assert result.success is True
+            assert result.direction == "import"
+            assert result.entries_imported == 5
+            assert result.edges_imported == 3
+            assert result.entries_skipped == 1
+
+    def test_enyal_transfer_error(self, server_module) -> None:
+        """Test transfer with error."""
+        with patch.object(server_module, "get_store") as mock_get_store:
+            mock_store = MagicMock()
+            mock_store.export_entries.side_effect = Exception("Export error")
+            mock_get_store.return_value = mock_store
+
+            input_data = server_module.TransferInput(direction="export")
+
+            with pytest.raises(Exception, match="Export error"):
+                server_module.enyal_transfer(input_data)
 
 
 class TestVerifyStartupHealth:
@@ -1605,63 +1786,3 @@ class TestCleanup:
         server_module._cleanup()
 
         assert server_module._store is None
-
-
-class TestInputModels:
-    """Tests for additional input model validation."""
-
-    def test_link_input_defaults(self, server_module) -> None:
-        """Test LinkInput default values."""
-        input_data = server_module.LinkInput(
-            source_id="s1", target_id="t1", relation="relates_to"
-        )
-        assert input_data.confidence == 1.0
-        assert input_data.reason is None
-
-    def test_edges_input_defaults(self, server_module) -> None:
-        """Test EdgesInput default values."""
-        input_data = server_module.EdgesInput(entry_id="e1")
-        assert input_data.direction == "both"
-        assert input_data.relation_type is None
-
-    def test_traverse_input_defaults(self, server_module) -> None:
-        """Test TraverseInput default values."""
-        input_data = server_module.TraverseInput(start_query="test")
-        assert input_data.direction == "outgoing"
-        assert input_data.max_depth == 2
-        assert input_data.relation_types is None
-
-    def test_impact_input_defaults(self, server_module) -> None:
-        """Test ImpactInput default values."""
-        input_data = server_module.ImpactInput()
-        assert input_data.entry_id is None
-        assert input_data.query is None
-        assert input_data.max_depth == 3
-
-    def test_review_input_defaults(self, server_module) -> None:
-        """Test ReviewInput default values."""
-        input_data = server_module.ReviewInput()
-        assert input_data.category == "all"
-        assert input_data.limit == 10
-
-    def test_history_input(self, server_module) -> None:
-        """Test HistoryInput creation."""
-        input_data = server_module.HistoryInput(entry_id="e1", limit=5)
-        assert input_data.entry_id == "e1"
-        assert input_data.limit == 5
-
-    def test_analytics_input_defaults(self, server_module) -> None:
-        """Test AnalyticsInput default values."""
-        input_data = server_module.AnalyticsInput()
-        assert input_data.entry_id is None
-        assert input_data.event_type is None
-        assert input_data.days == 30
-
-    def test_recall_by_scope_input(self, server_module) -> None:
-        """Test RecallByScopeInput creation."""
-        input_data = server_module.RecallByScopeInput(
-            query="test", file_path="/path/to/file.py"
-        )
-        assert input_data.exclude_superseded is True
-        assert input_data.flag_conflicts is True
-        assert input_data.freshness_boost == 0.1

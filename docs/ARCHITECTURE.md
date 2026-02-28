@@ -748,7 +748,7 @@ The `RetrievalEngine` provides a high-level API for hybrid search, sitting above
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                    MCP Tools Layer                            │
-│  enyal_recall  │  enyal_recall_by_scope  │  enyal_get         │
+│  enyal_recall (with optional file_path)  │  enyal_get         │
 └───────────────────────────┬──────────────────────────────────┘
                             │
                             ▼
@@ -970,26 +970,6 @@ def enyal_recall(input: RecallInput) -> list[dict]:
     return [result.to_dict() for result in results]
 
 @mcp.tool()
-def enyal_recall_by_scope(input: RecallByScopeInput) -> dict:
-    """
-    Search Enyal's memory with automatic scope resolution.
-
-    Searches from most specific (file) to most general (global) scope,
-    returning results weighted by scope specificity.
-    """
-    retrieval = get_retrieval_engine()
-    results = retrieval.search_by_scope(
-        query=input.query,
-        file_path=input.file_path,
-        limit=input.limit,
-        min_confidence=input.min_confidence
-    )
-    return {
-        "results": [r.to_dict() for r in results],
-        "scopes_searched": ["file", "project", "workspace", "global"]
-    }
-
-@mcp.tool()
 def enyal_update(input: UpdateInput) -> dict:
     """
     Update an existing context entry.
@@ -1032,15 +1012,15 @@ def enyal_forget(entry_id: str, hard_delete: bool = False) -> dict:
     return {"success": success, "action": "deleted" if hard_delete else "deprecated"}
 
 @mcp.tool()
-def enyal_stats() -> dict:
+def enyal_status(input: StatusInput) -> dict:
     """
-    Get usage statistics and health metrics.
+    Get memory status, health, review items, or usage analytics.
 
-    Returns counts by scope, content type, confidence distribution,
-    and storage metrics.
+    Views: summary, health, review, analytics.
     """
     store = get_context_store()
-    return store.get_stats()
+    # Routes to store.stats(), store.health_check(), etc. based on input.view
+    ...
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
@@ -1281,15 +1261,13 @@ The window function ensures we always return the edge information from the short
 
 | Tool | Description |
 |------|-------------|
-| `enyal_link` | Create explicit relationship |
-| `enyal_unlink` | Remove a relationship |
-| `enyal_edges` | Get edges for an entry |
-| `enyal_traverse` | Walk the graph |
+| `enyal_link` | Create or remove a relationship (action='create' or 'remove') |
+| `enyal_traverse` | Walk the graph or get edges for an entry (entry_id or start_query) |
 | `enyal_impact` | Find affected entries |
 
 ### Statistics
 
-`enyal_stats` now includes:
+`enyal_status(view='summary')` includes:
 - `total_edges`: Count of all edges
 - `edges_by_type`: Breakdown by relationship type
 - `connected_entries`: Entries with at least one edge
@@ -1482,10 +1460,10 @@ analytics = store.get_analytics(
 
 | Tool | Description |
 |------|-------------|
-| `enyal_health` | Get graph health metrics and issues |
-| `enyal_review` | Get entries needing review (stale/orphan/conflicted) |
-| `enyal_history` | Get version history for an entry |
-| `enyal_analytics` | Get usage analytics |
+| `enyal_status(view='health')` | Get graph health metrics and recommendations |
+| `enyal_status(view='review')` | Get entries needing review (stale/orphan/conflicted) |
+| `enyal_get(include_history=True)` | Get entry details with version history |
+| `enyal_status(view='analytics')` | Get usage analytics |
 
 ---
 
