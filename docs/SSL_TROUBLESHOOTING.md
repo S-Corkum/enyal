@@ -4,13 +4,13 @@ This guide helps users in corporate environments with SSL inspection (e.g., Zsca
 
 ## Understanding the Problem
 
-When you first run Enyal, it downloads the `all-MiniLM-L6-v2` embedding model from Hugging Face Hub. Corporate networks often use **SSL inspection** (also called TLS interception) to monitor HTTPS traffic, which injects enterprise CA certificates into the SSL chain.
+When you first run Enyal, it downloads the `nomic-ai/nomic-embed-text-v1.5` embedding model from Hugging Face Hub. Corporate networks often use **SSL inspection** (also called TLS interception) to monitor HTTPS traffic, which injects enterprise CA certificates into the SSL chain.
 
 Python's `requests` library (used by Hugging Face libraries) doesn't recognize these enterprise certificates by default, resulting in errors like:
 
 ```
 SSLError: HTTPSConnectionPool(host='huggingface.co', port=443):
-Max retries exceeded with url: /api/models/sentence-transformers/all-MiniLM-L6-v2
+Max retries exceeded with url: /api/models/sentence-transformers/nomic-ai/nomic-embed-text-v1.5
 (Caused by SSLError(SSLCertVerificationError(1,
 '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
 self signed certificate in certificate chain')))
@@ -151,7 +151,7 @@ enyal model download --cache-dir /path/to/export/location
 # Or use Python directly
 python -c "
 from sentence_transformers import SentenceTransformer
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = SentenceTransformer('nomic-ai/nomic-embed-text-v1.5')
 model.save('/path/to/export/my-model')
 "
 ```
@@ -191,7 +191,7 @@ If the model is already cached (from a previous successful download), you can ru
 
 ```bash
 # Check if model is cached
-ls ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2
+ls ~/.cache/huggingface/hub/models--sentence-transformers--nomic-ai/nomic-embed-text-v1.5
 
 # If it exists, enable offline mode
 export ENYAL_OFFLINE_MODE=true
@@ -222,7 +222,7 @@ enyal model status
 enyal model download
 
 # Download specific model
-enyal model download --model all-MiniLM-L6-v2
+enyal model download --model nomic-ai/nomic-embed-text-v1.5
 
 # Download to custom cache directory
 enyal model download --cache-dir /custom/path
@@ -367,7 +367,7 @@ Get-ChildItem -Path Cert:\LocalMachine\Root | Export-Certificate -FilePath C:\ce
 
 ### "Model not found" in Offline Mode
 
-1. Check cache exists: `ls ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2`
+1. Check cache exists: `ls ~/.cache/huggingface/hub/models--sentence-transformers--nomic-ai/nomic-embed-text-v1.5`
 2. If not, download first: `enyal model download`
 3. Or copy from another machine to this location
 

@@ -5,6 +5,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from enyal.models.context import (
     ContextEntry,
@@ -239,7 +240,12 @@ class TestEnyalRemember:
         """Test successful remember operation."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
-            mock_store.remember.return_value = "new-entry-id-123"
+            mock_store.remember.return_value = {
+                "entry_id": "new-entry-id-123",
+                "action": "created",
+                "duplicate_of": None,
+                "similarity": None,
+            }
             mock_get_store.return_value = mock_store
 
             input_data = server_module.RememberInput(
@@ -250,15 +256,20 @@ class TestEnyalRemember:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert result["entry_id"] == "new-entry-id-123"
-            assert "message" in result
+            assert result.success is True
+            assert result.entry_id == "new-entry-id-123"
+            assert hasattr(result, "message")
 
     def test_enyal_remember_with_all_options(self, server_module) -> None:
         """Test remember with all options."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
-            mock_store.remember.return_value = "new-entry-id"
+            mock_store.remember.return_value = {
+                "entry_id": "new-entry-id",
+                "action": "created",
+                "duplicate_of": None,
+                "similarity": None,
+            }
             mock_get_store.return_value = mock_store
 
             input_data = server_module.RememberInput(
@@ -272,7 +283,7 @@ class TestEnyalRemember:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
+            assert result.success is True
             mock_store.remember.assert_called_once_with(
                 content="Complex entry",
                 content_type=ContextType.DECISION,
@@ -305,11 +316,8 @@ class TestEnyalRemember:
 
             input_data = server_module.RememberInput(content="Test content")
 
-            result = server_module.enyal_remember(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
-            assert "Database error" in result["error"]
+            with pytest.raises(Exception, match="Database error"):
+                server_module.enyal_remember(input_data)
 
 
 class TestEnyalRecall:
@@ -328,10 +336,10 @@ class TestEnyalRecall:
 
             result = server_module.enyal_recall(input_data)
 
-            assert result["success"] is True
-            assert result["count"] == 1
-            assert len(result["results"]) == 1
-            assert result["results"][0]["content"] == "Test content for unit tests"
+            assert result.success is True
+            assert result.count == 1
+            assert len(result.results) == 1
+            assert result.results[0].content == "Test content for unit tests"
 
     def test_enyal_recall_with_filters(self, server_module, sample_entry: ContextEntry) -> None:
         """Test recall with filters."""
@@ -352,7 +360,7 @@ class TestEnyalRecall:
 
             result = server_module.enyal_recall(input_data)
 
-            assert result["success"] is True
+            assert result.success is True
             mock_retrieval.search.assert_called_once_with(
                 query="test query",
                 limit=5,
@@ -377,9 +385,9 @@ class TestEnyalRecall:
 
             result = server_module.enyal_recall(input_data)
 
-            assert result["success"] is True
-            assert result["count"] == 0
-            assert result["results"] == []
+            assert result.success is True
+            assert result.count == 0
+            assert result.results == []
 
     def test_enyal_recall_error(self, server_module) -> None:
         """Test recall operation with error."""
@@ -390,11 +398,8 @@ class TestEnyalRecall:
 
             input_data = server_module.RecallInput(query="test query")
 
-            result = server_module.enyal_recall(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
-            assert result["results"] == []
+            with pytest.raises(Exception, match="Search error"):
+                server_module.enyal_recall(input_data)
 
 
 class TestEnyalForget:
@@ -411,8 +416,8 @@ class TestEnyalForget:
 
             result = server_module.enyal_forget(input_data)
 
-            assert result["success"] is True
-            assert "deprecated" in result["message"]
+            assert result.success is True
+            assert "deprecated" in result.message
             mock_store.forget.assert_called_once_with("test-entry-id", hard_delete=False)
 
     def test_enyal_forget_hard_delete(self, server_module) -> None:
@@ -426,8 +431,8 @@ class TestEnyalForget:
 
             result = server_module.enyal_forget(input_data)
 
-            assert result["success"] is True
-            assert "permanently deleted" in result["message"]
+            assert result.success is True
+            assert "permanently deleted" in result.message
             mock_store.forget.assert_called_once_with("test-entry-id", hard_delete=True)
 
     def test_enyal_forget_not_found(self, server_module) -> None:
@@ -439,10 +444,8 @@ class TestEnyalForget:
 
             input_data = server_module.ForgetInput(entry_id="nonexistent-id")
 
-            result = server_module.enyal_forget(input_data)
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_forget(input_data)
 
     def test_enyal_forget_error(self, server_module) -> None:
         """Test forget operation with error."""
@@ -453,10 +456,8 @@ class TestEnyalForget:
 
             input_data = server_module.ForgetInput(entry_id="test-id")
 
-            result = server_module.enyal_forget(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(Exception, match="Database error"):
+                server_module.enyal_forget(input_data)
 
 
 class TestEnyalUpdate:
@@ -478,8 +479,8 @@ class TestEnyalUpdate:
 
             result = server_module.enyal_update(input_data)
 
-            assert result["success"] is True
-            assert "updated" in result["message"]
+            assert result.success is True
+            assert "updated" in result.message
             mock_store.update.assert_called_once_with(
                 entry_id="test-entry-id",
                 content="Updated content",
@@ -496,10 +497,8 @@ class TestEnyalUpdate:
 
             input_data = server_module.UpdateInput(entry_id="nonexistent-id", content="New content")
 
-            result = server_module.enyal_update(input_data)
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_update(input_data)
 
     def test_enyal_update_error(self, server_module) -> None:
         """Test update operation with error."""
@@ -510,10 +509,8 @@ class TestEnyalUpdate:
 
             input_data = server_module.UpdateInput(entry_id="test-id", content="New content")
 
-            result = server_module.enyal_update(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(Exception, match="Update error"):
+                server_module.enyal_update(input_data)
 
 
 class TestEnyalStats:
@@ -528,11 +525,11 @@ class TestEnyalStats:
 
             result = server_module.enyal_stats()
 
-            assert result["success"] is True
-            assert "stats" in result
-            assert result["stats"]["total_entries"] == 100
-            assert result["stats"]["active_entries"] == 90
-            assert result["stats"]["deprecated_entries"] == 10
+            assert result.success is True
+            assert result.stats is not None
+            assert result.stats["total_entries"] == 100
+            assert result.stats["active_entries"] == 90
+            assert result.stats["deprecated_entries"] == 10
 
     def test_enyal_stats_error(self, server_module) -> None:
         """Test stats operation with error."""
@@ -541,10 +538,8 @@ class TestEnyalStats:
             mock_store.stats.side_effect = Exception("Stats error")
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_stats()
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(Exception, match="Stats error"):
+                server_module.enyal_stats()
 
 
 class TestEnyalGet:
@@ -555,14 +550,15 @@ class TestEnyalGet:
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
             mock_store.get.return_value = sample_entry
+            mock_store.get_edges.return_value = []
             mock_get_store.return_value = mock_store
 
             result = server_module.enyal_get("test-entry-id")
 
-            assert result["success"] is True
-            assert "entry" in result
-            assert result["entry"]["content"] == "Test content for unit tests"
-            assert result["entry"]["type"] == "fact"
+            assert result.success is True
+            assert result.entry is not None
+            assert result.entry["content"] == "Test content for unit tests"
+            assert result.entry["type"] == "fact"
 
     def test_enyal_get_with_source(
         self, server_module, sample_entry_with_source: ContextEntry
@@ -571,13 +567,14 @@ class TestEnyalGet:
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
             mock_store.get.return_value = sample_entry_with_source
+            mock_store.get_edges.return_value = []
             mock_get_store.return_value = mock_store
 
             result = server_module.enyal_get("test-entry-id")
 
-            assert result["success"] is True
-            assert result["entry"]["source_type"] == "conversation"
-            assert result["entry"]["source_ref"] == "session-123"
+            assert result.success is True
+            assert result.entry["source_type"] == "conversation"
+            assert result.entry["source_ref"] == "session-123"
 
     def test_enyal_get_not_found(self, server_module) -> None:
         """Test get when entry not found."""
@@ -586,10 +583,8 @@ class TestEnyalGet:
             mock_store.get.return_value = None
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_get("nonexistent-id")
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_get("nonexistent-id")
 
     def test_enyal_get_error(self, server_module) -> None:
         """Test get operation with error."""
@@ -598,10 +593,8 @@ class TestEnyalGet:
             mock_store.get.side_effect = Exception("Database error")
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_get("test-id")
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(Exception, match="Database error"):
+                server_module.enyal_get("test-id")
 
 
 class TestEnyalRecallByScope:
@@ -623,8 +616,8 @@ class TestEnyalRecallByScope:
 
             result = server_module.enyal_recall_by_scope(input_data)
 
-            assert result["success"] is True
-            assert result["count"] == 1
+            assert result.success is True
+            assert result.count == 1
             mock_retrieval.search_by_scope.assert_called_once()
 
     def test_enyal_recall_by_scope_error(self, server_module) -> None:
@@ -639,10 +632,8 @@ class TestEnyalRecallByScope:
                 file_path="/path/to/file.py",
             )
 
-            result = server_module.enyal_recall_by_scope(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(Exception, match="Scope error"):
+                server_module.enyal_recall_by_scope(input_data)
 
 
 class TestEnyalRememberDedup:
@@ -668,10 +659,10 @@ class TestEnyalRememberDedup:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert result["action"] == "existing"
-            assert result["duplicate_of"] == "existing-id"
-            assert "similarity" in result["message"]
+            assert result.success is True
+            assert result.action == "existing"
+            assert result.duplicate_of == "existing-id"
+            assert "similarity" in result.message
 
     def test_enyal_remember_dedup_created(self, server_module) -> None:
         """Test remember creates new entry when no duplicate."""
@@ -692,9 +683,9 @@ class TestEnyalRememberDedup:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert result["action"] == "created"
-            assert result["entry_id"] == "new-entry-id"
+            assert result.success is True
+            assert result.action == "created"
+            assert result.entry_id == "new-entry-id"
 
 
 class TestEnyalRememberMerged:
@@ -720,9 +711,9 @@ class TestEnyalRememberMerged:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert result["action"] == "merged"
-            assert "similarity" in result["message"]
+            assert result.success is True
+            assert result.action == "merged"
+            assert "similarity" in result.message
 
     def test_enyal_remember_with_detect_conflicts(self, server_module) -> None:
         """Test remember with conflict detection enabled."""
@@ -746,10 +737,9 @@ class TestEnyalRememberMerged:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert result["action"] == "created"
-            assert "potential_conflicts" in result
-            assert len(result["potential_conflicts"]) == 1
+            assert result.success is True
+            assert result.action == "created"
+            assert len(result.potential_conflicts) == 1
 
     def test_enyal_remember_with_suggest_supersedes(self, server_module) -> None:
         """Test remember with supersedes suggestion enabled."""
@@ -773,9 +763,8 @@ class TestEnyalRememberMerged:
 
             result = server_module.enyal_remember(input_data)
 
-            assert result["success"] is True
-            assert "supersedes_candidates" in result
-            assert len(result["supersedes_candidates"]) == 1
+            assert result.success is True
+            assert len(result.supersedes_candidates) == 1
 
 
 class TestEnyalLink:
@@ -798,9 +787,9 @@ class TestEnyalLink:
 
             result = server_module.enyal_link(input_data)
 
-            assert result["success"] is True
-            assert result["edge_id"] == "edge-123"
-            assert "relates_to" in result["message"]
+            assert result.success is True
+            assert result.edge_id == "edge-123"
+            assert "relates_to" in result.message
 
     def test_enyal_link_failure(self, server_module) -> None:
         """Test link when entries don't exist."""
@@ -815,10 +804,8 @@ class TestEnyalLink:
                 relation="relates_to",
             )
 
-            result = server_module.enyal_link(input_data)
-
-            assert result["success"] is False
-            assert "error" in result
+            with pytest.raises(ToolError):
+                server_module.enyal_link(input_data)
 
     def test_enyal_link_no_reason(self, server_module) -> None:
         """Test link creation without a reason."""
@@ -835,27 +822,22 @@ class TestEnyalLink:
 
             result = server_module.enyal_link(input_data)
 
-            assert result["success"] is True
+            assert result.success is True
             mock_store.link.assert_called_once()
             # metadata should be empty dict when no reason
             call_kwargs = mock_store.link.call_args
             assert call_kwargs[1]["metadata"] == {}
 
     def test_enyal_link_value_error(self, server_module) -> None:
-        """Test link with invalid relation type."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_get_store.return_value = MagicMock()
+        """Test link with invalid relation type raises validation error."""
+        from pydantic import ValidationError
 
-            input_data = server_module.LinkInput(
+        with pytest.raises(ValidationError):
+            server_module.LinkInput(
                 source_id="entry-1",
                 target_id="entry-2",
                 relation="invalid_type",
             )
-
-            result = server_module.enyal_link(input_data)
-
-            assert result["success"] is False
-            assert "Invalid relation type" in result["error"]
 
     def test_enyal_link_error(self, server_module) -> None:
         """Test link with unexpected error."""
@@ -870,10 +852,8 @@ class TestEnyalLink:
                 relation="relates_to",
             )
 
-            result = server_module.enyal_link(input_data)
-
-            assert result["success"] is False
-            assert "DB error" in result["error"]
+            with pytest.raises(RuntimeError, match="DB error"):
+                server_module.enyal_link(input_data)
 
 
 class TestEnyalUnlink:
@@ -888,8 +868,8 @@ class TestEnyalUnlink:
 
             result = server_module.enyal_unlink("edge-123")
 
-            assert result["success"] is True
-            assert "edge-123" in result["message"]
+            assert result.success is True
+            assert "edge-123" in result.message
 
     def test_enyal_unlink_not_found(self, server_module) -> None:
         """Test unlink when edge not found."""
@@ -898,10 +878,8 @@ class TestEnyalUnlink:
             mock_store.unlink.return_value = False
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_unlink("nonexistent-edge")
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_unlink("nonexistent-edge")
 
     def test_enyal_unlink_error(self, server_module) -> None:
         """Test unlink with error."""
@@ -910,10 +888,8 @@ class TestEnyalUnlink:
             mock_store.unlink.side_effect = Exception("Unlink error")
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_unlink("edge-123")
-
-            assert result["success"] is False
-            assert "Unlink error" in result["error"]
+            with pytest.raises(Exception, match="Unlink error"):
+                server_module.enyal_unlink("edge-123")
 
 
 class TestEnyalEdges:
@@ -933,10 +909,10 @@ class TestEnyalEdges:
 
             result = server_module.enyal_edges(input_data)
 
-            assert result["success"] is True
-            assert result["count"] == 1
-            assert len(result["edges"]) == 1
-            assert result["edges"][0]["relation"] == "relates_to"
+            assert result.success is True
+            assert result.count == 1
+            assert len(result.edges) == 1
+            assert result.edges[0].relation == "relates_to"
 
     def test_enyal_edges_with_filter(self, server_module) -> None:
         """Test edges with relation type filter."""
@@ -953,26 +929,18 @@ class TestEnyalEdges:
 
             result = server_module.enyal_edges(input_data)
 
-            assert result["success"] is True
-            assert result["count"] == 0
+            assert result.success is True
+            assert result.count == 0
 
     def test_enyal_edges_value_error(self, server_module) -> None:
-        """Test edges with invalid direction."""
-        with patch.object(server_module, "get_store") as mock_get_store:
-            mock_store = MagicMock()
-            mock_store.get_edges.side_effect = ValueError("Invalid direction")
-            mock_get_store.return_value = mock_store
+        """Test edges with invalid direction raises validation error."""
+        from pydantic import ValidationError
 
-            input_data = server_module.EdgesInput(
+        with pytest.raises(ValidationError):
+            server_module.EdgesInput(
                 entry_id="test-entry",
                 direction="invalid",
             )
-
-            result = server_module.enyal_edges(input_data)
-
-            assert result["success"] is False
-            assert "edges" in result
-            assert result["edges"] == []
 
     def test_enyal_edges_error(self, server_module) -> None:
         """Test edges with unexpected error."""
@@ -983,10 +951,8 @@ class TestEnyalEdges:
 
             input_data = server_module.EdgesInput(entry_id="test-entry")
 
-            result = server_module.enyal_edges(input_data)
-
-            assert result["success"] is False
-            assert "edges" in result
+            with pytest.raises(RuntimeError, match="DB error"):
+                server_module.enyal_edges(input_data)
 
 
 class TestEnyalTraverse:
@@ -1024,9 +990,9 @@ class TestEnyalTraverse:
 
             result = server_module.enyal_traverse(input_data)
 
-            assert result["success"] is True
-            assert "start_entry" in result
-            assert result["count"] == 1
+            assert result.success is True
+            assert result.start_entry is not None
+            assert result.count == 1
 
     def test_enyal_traverse_no_start(self, server_module) -> None:
         """Test traverse when no starting entry found."""
@@ -1040,10 +1006,8 @@ class TestEnyalTraverse:
 
             input_data = server_module.TraverseInput(start_query="nonexistent")
 
-            result = server_module.enyal_traverse(input_data)
-
-            assert result["success"] is False
-            assert "No entry found" in result["error"]
+            with pytest.raises(ToolError, match="No entry found"):
+                server_module.enyal_traverse(input_data)
 
     def test_enyal_traverse_with_relation_types(self, server_module, sample_entry) -> None:
         """Test traverse with relation type filter."""
@@ -1070,30 +1034,17 @@ class TestEnyalTraverse:
 
             result = server_module.enyal_traverse(input_data)
 
-            assert result["success"] is True
+            assert result.success is True
 
     def test_enyal_traverse_value_error(self, server_module, sample_entry) -> None:
-        """Test traverse with invalid relation type."""
-        mock_search_result = ContextSearchResult(
-            entry=sample_entry, distance=0.1, score=0.95
-        )
+        """Test traverse with invalid relation type raises validation error."""
+        from pydantic import ValidationError
 
-        with (
-            patch.object(server_module, "get_store"),
-            patch.object(server_module, "get_retrieval") as mock_get_retrieval,
-        ):
-            mock_retrieval = MagicMock()
-            mock_retrieval.search.return_value = [mock_search_result]
-            mock_get_retrieval.return_value = mock_retrieval
-
-            input_data = server_module.TraverseInput(
+        with pytest.raises(ValidationError):
+            server_module.TraverseInput(
                 start_query="test",
                 relation_types=["invalid_type"],
             )
-
-            result = server_module.enyal_traverse(input_data)
-
-            assert result["success"] is False
 
     def test_enyal_traverse_error(self, server_module) -> None:
         """Test traverse with unexpected error."""
@@ -1107,9 +1058,8 @@ class TestEnyalTraverse:
 
             input_data = server_module.TraverseInput(start_query="test")
 
-            result = server_module.enyal_traverse(input_data)
-
-            assert result["success"] is False
+            with pytest.raises(RuntimeError, match="Search error"):
+                server_module.enyal_traverse(input_data)
 
 
 class TestEnyalImpact:
@@ -1130,12 +1080,12 @@ class TestEnyalImpact:
 
             result = server_module.enyal_impact(input_data)
 
-            assert result["success"] is True
-            assert "target" in result
-            assert "impact" in result
-            assert result["impact"]["direct_dependencies"] == 0
-            assert result["impact"]["transitive_dependencies"] == 0
-            assert result["impact"]["related_entries"] == 0
+            assert result.success is True
+            assert result.target is not None
+            assert result.impact is not None
+            assert result.impact["direct_dependencies"] == 0
+            assert result.impact["transitive_dependencies"] == 0
+            assert result.impact["related_entries"] == 0
 
     def test_enyal_impact_with_query(self, server_module, sample_entry) -> None:
         """Test impact analysis using query."""
@@ -1159,8 +1109,8 @@ class TestEnyalImpact:
 
             result = server_module.enyal_impact(input_data)
 
-            assert result["success"] is True
-            assert result["target"]["content"] == sample_entry.content
+            assert result.success is True
+            assert result.target.content == sample_entry.content
 
     def test_enyal_impact_with_dependencies(self, server_module, sample_entry) -> None:
         """Test impact with actual dependencies found."""
@@ -1188,9 +1138,9 @@ class TestEnyalImpact:
 
             result = server_module.enyal_impact(input_data)
 
-            assert result["success"] is True
-            assert result["impact"]["direct_dependencies"] == 1
-            assert result["impact"]["related_entries"] == 1
+            assert result.success is True
+            assert result.impact["direct_dependencies"] == 1
+            assert result.impact["related_entries"] == 1
 
     def test_enyal_impact_entry_not_found(self, server_module) -> None:
         """Test impact when entry_id not found."""
@@ -1204,10 +1154,8 @@ class TestEnyalImpact:
 
             input_data = server_module.ImpactInput(entry_id="nonexistent-id")
 
-            result = server_module.enyal_impact(input_data)
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_impact(input_data)
 
     def test_enyal_impact_query_not_found(self, server_module) -> None:
         """Test impact when query returns no results."""
@@ -1221,10 +1169,8 @@ class TestEnyalImpact:
 
             input_data = server_module.ImpactInput(query="nonexistent query")
 
-            result = server_module.enyal_impact(input_data)
-
-            assert result["success"] is False
-            assert "No entry found" in result["error"]
+            with pytest.raises(ToolError, match="No entry found"):
+                server_module.enyal_impact(input_data)
 
     def test_enyal_impact_no_input(self, server_module) -> None:
         """Test impact with neither entry_id nor query."""
@@ -1234,10 +1180,8 @@ class TestEnyalImpact:
         ):
             input_data = server_module.ImpactInput()
 
-            result = server_module.enyal_impact(input_data)
-
-            assert result["success"] is False
-            assert "Provide either" in result["error"]
+            with pytest.raises(ToolError, match="Provide either"):
+                server_module.enyal_impact(input_data)
 
     def test_enyal_impact_error(self, server_module) -> None:
         """Test impact with unexpected error."""
@@ -1251,9 +1195,8 @@ class TestEnyalImpact:
 
             input_data = server_module.ImpactInput(entry_id="test-id")
 
-            result = server_module.enyal_impact(input_data)
-
-            assert result["success"] is False
+            with pytest.raises(RuntimeError, match="DB error"):
+                server_module.enyal_impact(input_data)
 
 
 class TestEnyalHealth:
@@ -1280,9 +1223,9 @@ class TestEnyalHealth:
 
             result = server_module.enyal_health()
 
-            assert result["success"] is True
-            assert result["health"] == health_data
-            assert "recommendations" in result
+            assert result.success is True
+            assert result.health == health_data
+            assert result.recommendations is not None
 
     def test_enyal_health_error(self, server_module) -> None:
         """Test health check with error."""
@@ -1291,10 +1234,8 @@ class TestEnyalHealth:
             mock_store.health_check.side_effect = Exception("Health error")
             mock_get_store.return_value = mock_store
 
-            result = server_module.enyal_health()
-
-            assert result["success"] is False
-            assert "Health error" in result["error"]
+            with pytest.raises(Exception, match="Health error"):
+                server_module.enyal_health()
 
 
 class TestGetHealthRecommendations:
@@ -1409,10 +1350,10 @@ class TestEnyalReview:
 
             result = server_module.enyal_review(input_data)
 
-            assert result["success"] is True
-            assert "stale_entries" in result
-            assert "orphan_entries" in result
-            assert "conflicted_entries" in result
+            assert result.success is True
+            assert result.stale_entries is not None
+            assert result.orphan_entries is not None
+            assert result.conflicted_entries is not None
 
     def test_enyal_review_stale(self, server_module, sample_entry) -> None:
         """Test review stale category only."""
@@ -1425,9 +1366,9 @@ class TestEnyalReview:
 
             result = server_module.enyal_review(input_data)
 
-            assert result["success"] is True
-            assert "stale_entries" in result
-            assert "orphan_entries" not in result
+            assert result.success is True
+            assert len(result.stale_entries) > 0
+            assert result.orphan_entries == []
 
     def test_enyal_review_orphan(self, server_module, sample_entry) -> None:
         """Test review orphan category only."""
@@ -1440,9 +1381,9 @@ class TestEnyalReview:
 
             result = server_module.enyal_review(input_data)
 
-            assert result["success"] is True
-            assert "orphan_entries" in result
-            assert "stale_entries" not in result
+            assert result.success is True
+            assert result.orphan_entries is not None
+            assert result.stale_entries == []
 
     def test_enyal_review_conflicts(self, server_module, sample_entry) -> None:
         """Test review conflicts category."""
@@ -1455,8 +1396,8 @@ class TestEnyalReview:
 
             result = server_module.enyal_review(input_data)
 
-            assert result["success"] is True
-            assert "conflicted_entries" in result
+            assert result.success is True
+            assert result.conflicted_entries is not None
 
     def test_enyal_review_error(self, server_module) -> None:
         """Test review with error."""
@@ -1467,10 +1408,8 @@ class TestEnyalReview:
 
             input_data = server_module.ReviewInput(category="all")
 
-            result = server_module.enyal_review(input_data)
-
-            assert result["success"] is False
-            assert "Review error" in result["error"]
+            with pytest.raises(Exception, match="Review error"):
+                server_module.enyal_review(input_data)
 
 
 class TestEnyalHistory:
@@ -1502,9 +1441,9 @@ class TestEnyalHistory:
 
             result = server_module.enyal_history(input_data)
 
-            assert result["success"] is True
-            assert result["entry_id"] == "test-entry-id"
-            assert result["version_count"] == 1
+            assert result.success is True
+            assert result.entry_id == "test-entry-id"
+            assert result.version_count == 1
 
     def test_enyal_history_not_found(self, server_module) -> None:
         """Test history when entry not found."""
@@ -1516,24 +1455,20 @@ class TestEnyalHistory:
 
             input_data = server_module.HistoryInput(entry_id="nonexistent-id")
 
-            result = server_module.enyal_history(input_data)
-
-            assert result["success"] is False
-            assert "not found" in result["error"]
+            with pytest.raises(ToolError, match="not found"):
+                server_module.enyal_history(input_data)
 
     def test_enyal_history_error(self, server_module) -> None:
         """Test history with error."""
         with patch.object(server_module, "get_store") as mock_get_store:
             mock_store = MagicMock()
-            mock_store.get_history.side_effect = Exception("History error")
+            mock_store.get.side_effect = Exception("History error")
             mock_get_store.return_value = mock_store
 
             input_data = server_module.HistoryInput(entry_id="test-id")
 
-            result = server_module.enyal_history(input_data)
-
-            assert result["success"] is False
-            assert "History error" in result["error"]
+            with pytest.raises(Exception, match="History error"):
+                server_module.enyal_history(input_data)
 
 
 class TestEnyalAnalytics:
@@ -1556,8 +1491,8 @@ class TestEnyalAnalytics:
 
             result = server_module.enyal_analytics(input_data)
 
-            assert result["success"] is True
-            assert result["analytics"] == analytics_data
+            assert result.success is True
+            assert result.analytics == analytics_data
 
     def test_enyal_analytics_with_filters(self, server_module) -> None:
         """Test analytics with entry_id and event_type filters."""
@@ -1574,7 +1509,7 @@ class TestEnyalAnalytics:
 
             result = server_module.enyal_analytics(input_data)
 
-            assert result["success"] is True
+            assert result.success is True
             mock_store.get_analytics.assert_called_once_with(
                 entry_id="specific-entry",
                 event_type="recall",
@@ -1590,10 +1525,8 @@ class TestEnyalAnalytics:
 
             input_data = server_module.AnalyticsInput()
 
-            result = server_module.enyal_analytics(input_data)
-
-            assert result["success"] is False
-            assert "Analytics error" in result["error"]
+            with pytest.raises(Exception, match="Analytics error"):
+                server_module.enyal_analytics(input_data)
 
 
 class TestVerifyStartupHealth:

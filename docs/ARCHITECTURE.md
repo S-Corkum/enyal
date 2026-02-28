@@ -143,7 +143,7 @@ If Enyal scales to 1M+ vectors and query latency becomes problematic, we could a
 -- Vector index table (sqlite-vec virtual table)
 CREATE VIRTUAL TABLE context_vectors USING vec0(
     entry_id TEXT PRIMARY KEY,     -- Foreign key to context_entries
-    embedding float[384]           -- 384-dimensional from all-MiniLM-L6-v2
+    embedding float[768]           -- 768-dimensional from nomic-ai/nomic-embed-text-v1.5
 );
 
 -- Example KNN query
@@ -643,31 +643,32 @@ conn.execute("PRAGMA busy_timeout=10000")   # Longer timeout for multi-process
 
 ## 5. Local Embedding Strategy
 
-### Decision: sentence-transformers with all-MiniLM-L6-v2
+### Decision: sentence-transformers with nomic-ai/nomic-embed-text-v1.5
 
 ### Model Selection
 
 | Model | Dimensions | Size | Quality | Speed |
 |-------|------------|------|---------|-------|
+| nomic-ai/nomic-embed-text-v1.5 | 768 | ~270MB | Best | Fast |
 | all-MiniLM-L6-v2 | 384 | 80MB | Good | Fast |
 | all-mpnet-base-v2 | 768 | 420MB | Better | Slower |
 | paraphrase-MiniLM-L3-v2 | 384 | 60MB | Fair | Fastest |
 
-**Selected: all-MiniLM-L6-v2**
+**Selected: nomic-ai/nomic-embed-text-v1.5**
 
 **Rationale:**
-- 384 dimensions is optimal balance of quality and storage
-- 80MB model loads quickly (under 1s cold start)
-- Excellent for semantic similarity on technical content
-- Well-tested in production systems
+- 768 dimensions provides high quality embeddings
+- Superior semantic similarity on technical content
+- Matryoshka representation learning allows dimension flexibility
+- Well-supported by sentence-transformers ecosystem
 
 ### Storage Calculation
 
 ```
-100,000 entries × 384 dims × 4 bytes/float = 153.6 MB
+100,000 entries × 768 dims × 4 bytes/float = 307.2 MB
 ```
 
-This fits comfortably within the 500MB memory target.
+This fits within the memory target.
 
 ### Implementation
 
@@ -680,7 +681,7 @@ class EmbeddingEngine:
     """Lazy-loaded embedding engine."""
 
     _model: SentenceTransformer | None = None
-    _model_name = "all-MiniLM-L6-v2"
+    _model_name = "nomic-ai/nomic-embed-text-v1.5"
 
     @classmethod
     def get_model(cls) -> SentenceTransformer:
@@ -726,7 +727,7 @@ For production performance optimization:
 from sentence_transformers import SentenceTransformer
 
 # Export to ONNX
-model = SentenceTransformer("all-MiniLM-L6-v2")
+model = SentenceTransformer("nomic-ai/nomic-embed-text-v1.5")
 model.save("model_onnx", create_onnx=True)
 
 # Use ONNX runtime for inference
@@ -1079,10 +1080,10 @@ DuckDB is OLAP-optimized (wrong workload), LMDB requires two files and fixed map
 
 ### Q2: What's the embedding dimension and why?
 
-**384 dimensions** using all-MiniLM-L6-v2.
+**768 dimensions** using nomic-ai/nomic-embed-text-v1.5.
 
 Rationale:
-- Storage efficient: 100k entries × 384 × 4 bytes = 153MB
+- Storage efficient: 100k entries × 768 × 4 bytes = 307MB
 - Quality sufficient: Captures semantic meaning for technical content
 - Fast inference: ~5ms per embedding
 - Model size: 80MB, loads in <1s

@@ -73,7 +73,7 @@ class TestContextStore:
             content="Test content for storage",
             content_type=ContextType.FACT,
             scope_level=ScopeLevel.PROJECT,
-        )
+        )["entry_id"]
 
         assert entry_id is not None
 
@@ -95,7 +95,7 @@ class TestContextStore:
             tags=["test", "important"],
             metadata={"key": "value"},
             confidence=0.9,
-        )
+        )["entry_id"]
 
         entry = store.get(entry_id)
         assert entry is not None
@@ -107,7 +107,7 @@ class TestContextStore:
 
     def test_forget_soft_delete(self, store: ContextStore) -> None:
         """Test soft deleting an entry."""
-        entry_id = store.remember(content="To be deprecated")
+        entry_id = store.remember(content="To be deprecated")["entry_id"]
 
         success = store.forget(entry_id, hard_delete=False)
         assert success is True
@@ -119,7 +119,7 @@ class TestContextStore:
 
     def test_forget_hard_delete(self, store: ContextStore) -> None:
         """Test hard deleting an entry."""
-        entry_id = store.remember(content="To be deleted")
+        entry_id = store.remember(content="To be deleted")["entry_id"]
 
         success = store.forget(entry_id, hard_delete=True)
         assert success is True
@@ -135,7 +135,7 @@ class TestContextStore:
 
     def test_update_content(self, store: ContextStore) -> None:
         """Test updating entry content."""
-        entry_id = store.remember(content="Original content")
+        entry_id = store.remember(content="Original content")["entry_id"]
 
         success = store.update(entry_id, content="Updated content")
         assert success is True
@@ -146,7 +146,7 @@ class TestContextStore:
 
     def test_update_confidence(self, store: ContextStore) -> None:
         """Test updating entry confidence."""
-        entry_id = store.remember(content="Test", confidence=1.0)
+        entry_id = store.remember(content="Test", confidence=1.0)["entry_id"]
 
         success = store.update(entry_id, confidence=0.5)
         assert success is True
@@ -157,7 +157,7 @@ class TestContextStore:
 
     def test_update_tags(self, store: ContextStore) -> None:
         """Test updating entry tags."""
-        entry_id = store.remember(content="Test", tags=["old"])
+        entry_id = store.remember(content="Test", tags=["old"])["entry_id"]
 
         success = store.update(entry_id, tags=["new", "tags"])
         assert success is True
@@ -218,7 +218,7 @@ class TestContextStore:
 
     def test_recall_excludes_deprecated(self, store: ContextStore) -> None:
         """Test that recall excludes deprecated entries by default."""
-        entry_id = store.remember(content="Deprecated info")
+        entry_id = store.remember(content="Deprecated info")["entry_id"]
         store.forget(entry_id, hard_delete=False)
 
         results = store.recall("Deprecated info")
@@ -226,7 +226,7 @@ class TestContextStore:
 
     def test_recall_includes_deprecated(self, store: ContextStore) -> None:
         """Test that recall can include deprecated entries."""
-        entry_id = store.remember(content="Deprecated info")
+        entry_id = store.remember(content="Deprecated info")["entry_id"]
         store.forget(entry_id, hard_delete=False)
 
         results = store.recall("Deprecated info", include_deprecated=True)
@@ -286,7 +286,7 @@ class TestContextStore:
             entry_id = store.remember(
                 content=f"Test {ct.value}",
                 content_type=ct,
-            )
+            )["entry_id"]
             entry = store.get(entry_id)
             assert entry is not None
             assert entry.content_type == ct
@@ -304,14 +304,14 @@ class TestContextStore:
             entry_id = store.remember(
                 content=f"Test {sl.value}",
                 scope_level=sl,
-            )
+            )["entry_id"]
             entry = store.get(entry_id)
             assert entry is not None
             assert entry.scope_level == sl
 
     def test_update_with_content_regenerates_embedding(self, store: ContextStore) -> None:
         """Test that updating content regenerates the embedding."""
-        entry_id = store.remember(content="Original content")
+        entry_id = store.remember(content="Original content")["entry_id"]
 
         # Update the content
         success = store.update(entry_id, content="Updated content")
@@ -324,7 +324,7 @@ class TestContextStore:
 
     def test_update_metadata(self, store: ContextStore) -> None:
         """Test updating entry metadata."""
-        entry_id = store.remember(content="Test", metadata={"old": "value"})
+        entry_id = store.remember(content="Test", metadata={"old": "value"})["entry_id"]
 
         success = store.update(entry_id, metadata={"new": "metadata"})
         assert success is True
@@ -365,7 +365,7 @@ class TestContextStore:
             content="String enum test",
             content_type="decision",  # String instead of ContextType.DECISION
             scope_level="file",  # String instead of ScopeLevel.FILE
-        )
+        )["entry_id"]
 
         entry = store.get(entry_id)
         assert entry is not None
@@ -398,7 +398,7 @@ class TestFTSSearch:
 
     def test_fts_search_excludes_deprecated(self, store: ContextStore) -> None:
         """Test that FTS excludes deprecated entries by default."""
-        entry_id = store.remember(content="Deprecated FTS content")
+        entry_id = store.remember(content="Deprecated FTS content")["entry_id"]
         store.forget(entry_id, hard_delete=False)
 
         results = store.fts_search("Deprecated FTS", limit=10)
@@ -407,7 +407,7 @@ class TestFTSSearch:
 
     def test_fts_search_includes_deprecated(self, store: ContextStore) -> None:
         """Test FTS can include deprecated entries."""
-        entry_id = store.remember(content="Deprecated but searchable")
+        entry_id = store.remember(content="Deprecated but searchable")["entry_id"]
         store.forget(entry_id, hard_delete=False)
 
         results = store.fts_search("Deprecated but searchable", limit=10, include_deprecated=True)
@@ -452,7 +452,7 @@ class TestFindSimilar:
 
     def test_find_similar_excludes_deprecated(self, store: ContextStore) -> None:
         """Test that find_similar excludes deprecated entries."""
-        entry_id = store.remember(content="Deprecated similar content")
+        entry_id = store.remember(content="Deprecated similar content")["entry_id"]
         store.forget(entry_id, hard_delete=False)
 
         similar = store.find_similar(
@@ -468,7 +468,7 @@ class TestRememberDeduplication:
 
     def test_remember_dedup_reject(self, store: ContextStore) -> None:
         """Test that duplicate is rejected and existing ID returned."""
-        original_id = store.remember(content="Original unique content here")
+        original_id = store.remember(content="Original unique content here")["entry_id"]
 
         result = store.remember(
             content="Original unique content here",  # Exact duplicate
@@ -488,7 +488,7 @@ class TestRememberDeduplication:
             content="Content to be merged",
             tags=["original"],
             confidence=0.8,
-        )
+        )["entry_id"]
 
         result = store.remember(
             content="Content to be merged",
@@ -508,7 +508,7 @@ class TestRememberDeduplication:
 
     def test_remember_dedup_store(self, store: ContextStore) -> None:
         """Test that duplicate is stored anyway when on_duplicate='store'."""
-        original_id = store.remember(content="Force store duplicate")
+        original_id = store.remember(content="Force store duplicate")["entry_id"]
 
         result = store.remember(
             content="Force store duplicate",
@@ -526,8 +526,9 @@ class TestRememberDeduplication:
         # Default check_duplicate=False should store without checking
         result = store.remember(content="No dedup check")
 
-        # Returns string, not dict
-        assert isinstance(result, str)
+        # Always returns dict now
+        assert isinstance(result, dict)
+        assert result["action"] == "created"
 
 
 class TestKnowledgeGraph:
@@ -535,16 +536,16 @@ class TestKnowledgeGraph:
 
     def test_link_basic(self, store: ContextStore) -> None:
         """Test creating a basic edge."""
-        entry1_id = store.remember(content="First entry")
-        entry2_id = store.remember(content="Second entry")
+        entry1_id = store.remember(content="First entry")["entry_id"]
+        entry2_id = store.remember(content="Second entry")["entry_id"]
 
         edge_id = store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         assert edge_id is not None
 
     def test_link_all_edge_types(self, store: ContextStore) -> None:
         """Test creating edges of all types."""
-        entry1_id = store.remember(content="Entry one")
-        entry2_id = store.remember(content="Entry two")
+        entry1_id = store.remember(content="Entry one")["entry_id"]
+        entry2_id = store.remember(content="Entry two")["entry_id"]
 
         for edge_type in EdgeType:
             # Unlink first to avoid duplicate constraint
@@ -557,8 +558,8 @@ class TestKnowledgeGraph:
 
     def test_link_duplicate_rejected(self, store: ContextStore) -> None:
         """Test that duplicate edges are rejected."""
-        entry1_id = store.remember(content="Entry A")
-        entry2_id = store.remember(content="Entry B")
+        entry1_id = store.remember(content="Entry A")["entry_id"]
+        entry2_id = store.remember(content="Entry B")["entry_id"]
 
         edge_id1 = store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         edge_id2 = store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
@@ -568,14 +569,14 @@ class TestKnowledgeGraph:
 
     def test_link_nonexistent_entry(self, store: ContextStore) -> None:
         """Test linking to nonexistent entry returns None."""
-        entry_id = store.remember(content="Real entry")
+        entry_id = store.remember(content="Real entry")["entry_id"]
         edge_id = store.link(entry_id, "nonexistent-id", EdgeType.RELATES_TO)
         assert edge_id is None
 
     def test_unlink(self, store: ContextStore) -> None:
         """Test removing an edge."""
-        entry1_id = store.remember(content="Entry X")
-        entry2_id = store.remember(content="Entry Y")
+        entry1_id = store.remember(content="Entry X")["entry_id"]
+        entry2_id = store.remember(content="Entry Y")["entry_id"]
 
         edge_id = store.link(entry1_id, entry2_id, EdgeType.DEPENDS_ON)
         assert edge_id is not None
@@ -589,8 +590,8 @@ class TestKnowledgeGraph:
 
     def test_get_edge(self, store: ContextStore) -> None:
         """Test getting a single edge by ID."""
-        entry1_id = store.remember(content="Entry 1")
-        entry2_id = store.remember(content="Entry 2")
+        entry1_id = store.remember(content="Entry 1")["entry_id"]
+        entry2_id = store.remember(content="Entry 2")["entry_id"]
 
         edge_id = store.link(entry1_id, entry2_id, EdgeType.RELATES_TO, confidence=0.75)
         assert edge_id is not None
@@ -610,8 +611,8 @@ class TestKnowledgeGraph:
 
     def test_get_edges_outgoing(self, store: ContextStore) -> None:
         """Test getting outgoing edges."""
-        entry1_id = store.remember(content="Source entry")
-        entry2_id = store.remember(content="Target entry")
+        entry1_id = store.remember(content="Source entry")["entry_id"]
+        entry2_id = store.remember(content="Target entry")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
 
@@ -622,8 +623,8 @@ class TestKnowledgeGraph:
 
     def test_get_edges_incoming(self, store: ContextStore) -> None:
         """Test getting incoming edges."""
-        entry1_id = store.remember(content="Source")
-        entry2_id = store.remember(content="Target")
+        entry1_id = store.remember(content="Source")["entry_id"]
+        entry2_id = store.remember(content="Target")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.DEPENDS_ON)
 
@@ -633,9 +634,9 @@ class TestKnowledgeGraph:
 
     def test_get_edges_both_directions(self, store: ContextStore) -> None:
         """Test getting edges in both directions."""
-        entry1_id = store.remember(content="Middle entry")
-        entry2_id = store.remember(content="Left entry")
-        entry3_id = store.remember(content="Right entry")
+        entry1_id = store.remember(content="Middle entry")["entry_id"]
+        entry2_id = store.remember(content="Left entry")["entry_id"]
+        entry3_id = store.remember(content="Right entry")["entry_id"]
 
         store.link(entry2_id, entry1_id, EdgeType.RELATES_TO)  # Incoming
         store.link(entry1_id, entry3_id, EdgeType.RELATES_TO)  # Outgoing
@@ -645,8 +646,8 @@ class TestKnowledgeGraph:
 
     def test_get_edges_filtered_by_type(self, store: ContextStore) -> None:
         """Test filtering edges by type."""
-        entry1_id = store.remember(content="Entry 1")
-        entry2_id = store.remember(content="Entry 2")
+        entry1_id = store.remember(content="Entry 1")["entry_id"]
+        entry2_id = store.remember(content="Entry 2")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         store.link(entry1_id, entry2_id, EdgeType.DEPENDS_ON)
@@ -659,15 +660,15 @@ class TestKnowledgeGraph:
 
     def test_get_edges_invalid_direction(self, store: ContextStore) -> None:
         """Test that invalid direction raises ValueError."""
-        entry_id = store.remember(content="Test entry")
+        entry_id = store.remember(content="Test entry")["entry_id"]
 
         with pytest.raises(ValueError, match="Invalid direction"):
             store.get_edges(entry_id, direction="sideways")
 
     def test_traverse_single_hop(self, store: ContextStore) -> None:
         """Test traversing one level."""
-        entry1_id = store.remember(content="Start node")
-        entry2_id = store.remember(content="End node")
+        entry1_id = store.remember(content="Start node")["entry_id"]
+        entry2_id = store.remember(content="End node")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
 
@@ -678,9 +679,9 @@ class TestKnowledgeGraph:
 
     def test_traverse_multi_hop(self, store: ContextStore) -> None:
         """Test traversing multiple levels."""
-        entry1_id = store.remember(content="Node A")
-        entry2_id = store.remember(content="Node B")
-        entry3_id = store.remember(content="Node C")
+        entry1_id = store.remember(content="Node A")["entry_id"]
+        entry2_id = store.remember(content="Node B")["entry_id"]
+        entry3_id = store.remember(content="Node C")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         store.link(entry2_id, entry3_id, EdgeType.RELATES_TO)
@@ -695,10 +696,10 @@ class TestKnowledgeGraph:
 
     def test_traverse_max_depth(self, store: ContextStore) -> None:
         """Test depth limiting."""
-        entry1_id = store.remember(content="Level 0")
-        entry2_id = store.remember(content="Level 1")
-        entry3_id = store.remember(content="Level 2")
-        entry4_id = store.remember(content="Level 3")
+        entry1_id = store.remember(content="Level 0")["entry_id"]
+        entry2_id = store.remember(content="Level 1")["entry_id"]
+        entry3_id = store.remember(content="Level 2")["entry_id"]
+        entry4_id = store.remember(content="Level 3")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         store.link(entry2_id, entry3_id, EdgeType.RELATES_TO)
@@ -714,15 +715,15 @@ class TestKnowledgeGraph:
 
     def test_traverse_invalid_direction(self, store: ContextStore) -> None:
         """Test that invalid direction raises ValueError."""
-        entry_id = store.remember(content="Test entry")
+        entry_id = store.remember(content="Test entry")["entry_id"]
 
         with pytest.raises(ValueError, match="Invalid direction"):
             store.traverse(entry_id, direction="both")  # traverse only accepts outgoing/incoming
 
     def test_cascade_delete_edges(self, store: ContextStore) -> None:
         """Test edges are deleted when entry is deleted."""
-        entry1_id = store.remember(content="Entry to delete")
-        entry2_id = store.remember(content="Connected entry")
+        entry1_id = store.remember(content="Entry to delete")["entry_id"]
+        entry2_id = store.remember(content="Connected entry")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
 
@@ -743,7 +744,7 @@ class TestKnowledgeGraph:
             content="Python programming language guide",
             auto_link=True,
             auto_link_threshold=0.5,  # Lower threshold for test
-        )
+        )["entry_id"]
 
         # Should have created RELATES_TO edge
         edges = store.get_edges(entry2_id, direction="outgoing", edge_type=EdgeType.RELATES_TO)
@@ -751,8 +752,8 @@ class TestKnowledgeGraph:
 
     def test_explicit_supersedes(self, store: ContextStore) -> None:
         """Test explicit supersedes relationship."""
-        old_id = store.remember(content="Old decision")
-        new_id = store.remember(content="New decision", supersedes=old_id)
+        old_id = store.remember(content="Old decision")["entry_id"]
+        new_id = store.remember(content="New decision", supersedes=old_id)["entry_id"]
 
         edges = store.get_edges(new_id, direction="outgoing", edge_type=EdgeType.SUPERSEDES)
         assert len(edges) == 1
@@ -760,8 +761,8 @@ class TestKnowledgeGraph:
 
     def test_explicit_depends_on(self, store: ContextStore) -> None:
         """Test explicit depends_on relationship."""
-        dep_id = store.remember(content="Dependency")
-        main_id = store.remember(content="Main entry", depends_on=[dep_id])
+        dep_id = store.remember(content="Dependency")["entry_id"]
+        main_id = store.remember(content="Main entry", depends_on=[dep_id])["entry_id"]
 
         edges = store.get_edges(main_id, direction="outgoing", edge_type=EdgeType.DEPENDS_ON)
         assert len(edges) == 1
@@ -769,8 +770,8 @@ class TestKnowledgeGraph:
 
     def test_stats_with_edges(self, store: ContextStore) -> None:
         """Test that stats includes edge metrics."""
-        entry1_id = store.remember(content="Entry with edges 1")
-        entry2_id = store.remember(content="Entry with edges 2")
+        entry1_id = store.remember(content="Entry with edges 1")["entry_id"]
+        entry2_id = store.remember(content="Entry with edges 2")["entry_id"]
 
         store.link(entry1_id, entry2_id, EdgeType.RELATES_TO)
         store.link(entry1_id, entry2_id, EdgeType.DEPENDS_ON)
@@ -793,8 +794,8 @@ class TestGraphValidity:
 
     def test_get_superseded_ids_with_supersedes(self, store: ContextStore) -> None:
         """Test get_superseded_ids returns correctly superseded entries."""
-        old_id = store.remember(content="Old decision: use React")
-        new_id = store.remember(content="New decision: use Vue", supersedes=old_id)
+        old_id = store.remember(content="Old decision: use React")["entry_id"]
+        new_id = store.remember(content="New decision: use Vue", supersedes=old_id)["entry_id"]
 
         superseded = store.get_superseded_ids()
         assert old_id in superseded
@@ -808,8 +809,8 @@ class TestGraphValidity:
 
     def test_get_conflicted_ids_with_conflicts(self, store: ContextStore) -> None:
         """Test get_conflicted_ids returns entries with conflicts."""
-        entry1_id = store.remember(content="Use tabs for indentation")
-        entry2_id = store.remember(content="Use spaces for indentation")
+        entry1_id = store.remember(content="Use tabs for indentation")["entry_id"]
+        entry2_id = store.remember(content="Use spaces for indentation")["entry_id"]
         store.link(entry1_id, entry2_id, EdgeType.CONFLICTS_WITH)
 
         conflicted = store.get_conflicted_ids()
@@ -818,24 +819,24 @@ class TestGraphValidity:
 
     def test_is_superseded_false(self, store: ContextStore) -> None:
         """Test is_superseded returns False for non-superseded entry."""
-        entry_id = store.remember(content="Current entry")
+        entry_id = store.remember(content="Current entry")["entry_id"]
         assert store.is_superseded(entry_id) is False
 
     def test_is_superseded_true(self, store: ContextStore) -> None:
         """Test is_superseded returns True for superseded entry."""
-        old_id = store.remember(content="Old entry")
+        old_id = store.remember(content="Old entry")["entry_id"]
         store.remember(content="New entry", supersedes=old_id)
         assert store.is_superseded(old_id) is True
 
     def test_get_superseding_entry_none(self, store: ContextStore) -> None:
         """Test get_superseding_entry returns None when not superseded."""
-        entry_id = store.remember(content="Current entry")
+        entry_id = store.remember(content="Current entry")["entry_id"]
         assert store.get_superseding_entry(entry_id) is None
 
     def test_get_superseding_entry_found(self, store: ContextStore) -> None:
         """Test get_superseding_entry returns the superseding entry ID."""
-        old_id = store.remember(content="Old entry")
-        new_id = store.remember(content="New entry", supersedes=old_id)
+        old_id = store.remember(content="Old entry")["entry_id"]
+        new_id = store.remember(content="New entry", supersedes=old_id)["entry_id"]
         assert store.get_superseding_entry(old_id) == new_id
 
     def test_appears_contradictory_negation(self, store: ContextStore) -> None:
@@ -863,8 +864,9 @@ class TestConflictDetection:
         """Test that conflict detection is disabled by default."""
         store.remember(content="First entry about Python")
         result = store.remember(content="Second entry about Python")
-        # Should be a string (entry ID) not a dict
-        assert isinstance(result, str)
+        # Always returns dict now
+        assert isinstance(result, dict)
+        assert result["action"] == "created"
 
     def test_detect_conflicts_returns_dict(self, store: ContextStore) -> None:
         """Test detect_conflicts=True returns dict with conflict info."""
@@ -910,7 +912,7 @@ class TestHealthCheck:
 
     def test_health_check_with_supersedes(self, store: ContextStore) -> None:
         """Test health check detects superseded entries."""
-        old_id = store.remember(content="Old entry")
+        old_id = store.remember(content="Old entry")["entry_id"]
         store.remember(content="New entry", supersedes=old_id)
 
         health = store.health_check()
@@ -918,8 +920,8 @@ class TestHealthCheck:
 
     def test_health_check_with_conflicts(self, store: ContextStore) -> None:
         """Test health check detects conflicts."""
-        entry1 = store.remember(content="Entry 1")
-        entry2 = store.remember(content="Entry 2")
+        entry1 = store.remember(content="Entry 1")["entry_id"]
+        entry2 = store.remember(content="Entry 2")["entry_id"]
         store.link(entry1, entry2, EdgeType.CONFLICTS_WITH)
 
         health = store.health_check()
@@ -931,7 +933,7 @@ class TestVersioning:
 
     def test_get_history_initial_version(self, store: ContextStore) -> None:
         """Test that remember() automatically creates initial version."""
-        entry_id = store.remember(content="New entry")
+        entry_id = store.remember(content="New entry")["entry_id"]
         history = store.get_history(entry_id)
         assert len(history) == 1  # Initial version created automatically
         assert history[0]["version"] == 1
@@ -940,7 +942,7 @@ class TestVersioning:
 
     def test_version_on_update(self, store: ContextStore) -> None:
         """Test that update() creates a new version."""
-        entry_id = store.remember(content="Original content")
+        entry_id = store.remember(content="Original content")["entry_id"]
         store.update(entry_id, content="Updated content")
 
         history = store.get_history(entry_id)
@@ -959,7 +961,7 @@ class TestAnalytics:
 
     def test_track_usage(self, store: ContextStore) -> None:
         """Test tracking a usage event."""
-        entry_id = store.remember(content="Test entry")
+        entry_id = store.remember(content="Test entry")["entry_id"]
         store.track_usage(entry_id, "recall", query="test query", result_rank=1)
 
         analytics = store.get_analytics(entry_id=entry_id, days=1)
@@ -979,9 +981,9 @@ class TestReviewMethods:
 
     def test_get_orphan_entries(self, store: ContextStore) -> None:
         """Test get_orphan_entries returns entries with no edges."""
-        entry1 = store.remember(content="Orphan entry")
-        entry2 = store.remember(content="Connected entry")
-        entry3 = store.remember(content="Another connected")
+        entry1 = store.remember(content="Orphan entry")["entry_id"]
+        entry2 = store.remember(content="Connected entry")["entry_id"]
+        entry3 = store.remember(content="Another connected")["entry_id"]
         store.link(entry2, entry3, EdgeType.RELATES_TO)
 
         orphans = store.get_orphan_entries()
@@ -992,11 +994,212 @@ class TestReviewMethods:
 
     def test_get_conflicted_entries(self, store: ContextStore) -> None:
         """Test get_conflicted_entries returns conflict pairs."""
-        entry1 = store.remember(content="Entry 1")
-        entry2 = store.remember(content="Entry 2")
+        entry1 = store.remember(content="Entry 1")["entry_id"]
+        entry2 = store.remember(content="Entry 2")["entry_id"]
         store.link(entry1, entry2, EdgeType.CONFLICTS_WITH)
 
         conflicts = store.get_conflicted_entries()
         assert len(conflicts) == 1
         assert conflicts[0]["entry1"].id in (entry1, entry2)
         assert conflicts[0]["entry2"].id in (entry1, entry2)
+
+
+class TestRestore:
+    """Tests for restore method."""
+
+    def test_restore_soft_deleted(self, store: ContextStore) -> None:
+        """Test restoring a soft-deleted entry."""
+        entry_id = store.remember(content="To be restored")["entry_id"]
+        store.forget(entry_id, hard_delete=False)
+
+        # Verify it's deprecated
+        entry = store.get(entry_id)
+        assert entry is not None
+        assert entry.is_deprecated is True
+
+        # Restore it
+        success = store.restore(entry_id)
+        assert success is True
+
+        # Verify it's active again
+        entry = store.get(entry_id)
+        assert entry is not None
+        assert entry.is_deprecated is False
+
+    def test_restore_nonexistent(self, store: ContextStore) -> None:
+        """Test restoring a nonexistent entry."""
+        success = store.restore("nonexistent-id")
+        assert success is False
+
+    def test_restore_not_deprecated(self, store: ContextStore) -> None:
+        """Test restoring an entry that isn't deprecated."""
+        entry_id = store.remember(content="Active entry")["entry_id"]
+        success = store.restore(entry_id)
+        assert success is False
+
+    def test_restore_hard_deleted(self, store: ContextStore) -> None:
+        """Test restoring a hard-deleted entry (should fail)."""
+        entry_id = store.remember(content="Hard deleted")["entry_id"]
+        store.forget(entry_id, hard_delete=True)
+
+        success = store.restore(entry_id)
+        assert success is False
+
+    def test_restore_creates_version(self, store: ContextStore) -> None:
+        """Test that restore creates a version record."""
+        entry_id = store.remember(content="Versioned restore")["entry_id"]
+        store.forget(entry_id, hard_delete=False)
+        store.restore(entry_id)
+
+        history = store.get_history(entry_id)
+        assert len(history) >= 2
+        change_types = [h["change_type"] for h in history]
+        assert "restored" in change_types
+
+
+class TestSearchByTags:
+    """Tests for search_by_tags method."""
+
+    def test_search_single_tag(self, store: ContextStore) -> None:
+        """Test searching for a single tag."""
+        store.remember(content="Tagged entry", tags=["python"])
+        store.remember(content="Untagged entry")
+
+        results = store.search_by_tags(["python"])
+        assert len(results) == 1
+        assert results[0].content == "Tagged entry"
+
+    def test_search_multiple_tags_any(self, store: ContextStore) -> None:
+        """Test searching for any of multiple tags."""
+        store.remember(content="Python entry", tags=["python"])
+        store.remember(content="Rust entry", tags=["rust"])
+        store.remember(content="Neither entry")
+
+        results = store.search_by_tags(["python", "rust"], match_all=False)
+        assert len(results) == 2
+
+    def test_search_multiple_tags_all(self, store: ContextStore) -> None:
+        """Test searching for entries with ALL tags."""
+        store.remember(content="Both tags", tags=["python", "testing"])
+        store.remember(content="One tag", tags=["python"])
+
+        results = store.search_by_tags(["python", "testing"], match_all=True)
+        assert len(results) == 1
+        assert results[0].content == "Both tags"
+
+    def test_search_tags_excludes_deprecated(self, store: ContextStore) -> None:
+        """Test that deprecated entries are excluded by default."""
+        entry_id = store.remember(content="Deprecated tagged", tags=["test"])["entry_id"]
+        store.forget(entry_id, hard_delete=False)
+
+        results = store.search_by_tags(["test"])
+        assert len(results) == 0
+
+    def test_search_tags_includes_deprecated(self, store: ContextStore) -> None:
+        """Test including deprecated entries."""
+        entry_id = store.remember(content="Deprecated tagged", tags=["test"])["entry_id"]
+        store.forget(entry_id, hard_delete=False)
+
+        results = store.search_by_tags(["test"], include_deprecated=True)
+        assert len(results) == 1
+
+    def test_search_empty_tags(self, store: ContextStore) -> None:
+        """Test searching with empty tags list."""
+        results = store.search_by_tags([])
+        assert results == []
+
+    def test_search_tags_limit(self, store: ContextStore) -> None:
+        """Test search_by_tags respects limit."""
+        for i in range(5):
+            store.remember(content=f"Entry {i}", tags=["bulk"])
+
+        results = store.search_by_tags(["bulk"], limit=3)
+        assert len(results) == 3
+
+
+class TestExportImport:
+    """Tests for export and import methods."""
+
+    def test_export_basic(self, store: ContextStore) -> None:
+        """Test basic export."""
+        store.remember(content="Export test entry", tags=["export"])
+
+        data = store.export_entries()
+        assert data["version"] == "1.0"
+        assert len(data["entries"]) == 1
+        assert data["entries"][0]["content"] == "Export test entry"
+
+    def test_export_with_edges(self, store: ContextStore) -> None:
+        """Test export includes edges."""
+        e1 = store.remember(content="Entry 1")["entry_id"]
+        e2 = store.remember(content="Entry 2")["entry_id"]
+        store.link(e1, e2, EdgeType.RELATES_TO)
+
+        data = store.export_entries()
+        assert len(data["entries"]) == 2
+        assert len(data["edges"]) == 1
+
+    def test_export_scope_filter(self, store: ContextStore) -> None:
+        """Test export with scope filter."""
+        store.remember(content="Global entry", scope_level=ScopeLevel.GLOBAL)
+        store.remember(content="Project entry", scope_level=ScopeLevel.PROJECT)
+
+        data = store.export_entries(scope_level=ScopeLevel.GLOBAL)
+        assert len(data["entries"]) == 1
+        assert data["entries"][0]["content"] == "Global entry"
+
+    def test_export_excludes_deprecated(self, store: ContextStore) -> None:
+        """Test export excludes deprecated by default."""
+        entry_id = store.remember(content="Deprecated export")["entry_id"]
+        store.remember(content="Active export")
+        store.forget(entry_id, hard_delete=False)
+
+        data = store.export_entries()
+        assert len(data["entries"]) == 1
+
+    def test_import_basic(self, store: ContextStore, temp_db, mock_engine) -> None:
+        """Test basic import into fresh store."""
+        store.remember(content="Original entry", tags=["test"])
+        data = store.export_entries()
+
+        # Create a new store and import
+        new_store = ContextStore(temp_db.parent / "import_test.db", engine=mock_engine)
+        result = new_store.import_entries(data)
+
+        assert result["entries_imported"] == 1
+        assert result["entries_skipped"] == 0
+
+    def test_import_skip_duplicates(self, store: ContextStore) -> None:
+        """Test import skips duplicate IDs."""
+        store.remember(content="Existing entry")
+        data = store.export_entries()
+
+        # Import into same store should skip
+        result = store.import_entries(data)
+        assert result["entries_skipped"] == 1
+        assert result["entries_imported"] == 0
+
+    def test_import_round_trip(self, store: ContextStore, temp_db, mock_engine) -> None:
+        """Test export → import round trip preserves data."""
+        e1 = store.remember(content="Round trip 1", tags=["a", "b"])["entry_id"]
+        e2 = store.remember(content="Round trip 2", tags=["c"])["entry_id"]
+        store.link(e1, e2, EdgeType.DEPENDS_ON)
+
+        data = store.export_entries()
+
+        new_store = ContextStore(temp_db.parent / "round_trip.db", engine=mock_engine)
+        result = new_store.import_entries(data)
+
+        assert result["entries_imported"] == 2
+        assert result["edges_imported"] == 1
+
+        # Verify entries
+        entry1 = new_store.get(e1)
+        assert entry1 is not None
+        assert entry1.content == "Round trip 1"
+        assert entry1.tags == ["a", "b"]
+
+        # Verify edges
+        edges = new_store.get_edges(e1, direction="outgoing")
+        assert len(edges) == 1
+        assert edges[0].target_id == e2

@@ -316,7 +316,7 @@ class ContextStore:
         suggest_supersedes: bool = False,
         supersedes_threshold: float = 0.95,
         auto_supersede: bool = False,
-    ) -> str | dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Store new context in memory.
 
@@ -348,9 +348,7 @@ class ContextStore:
             auto_supersede: Automatically create SUPERSEDES edges for very similar entries.
 
         Returns:
-            Entry ID (str) if no detection features enabled.
-            Dict with entry_id, action, and detection info if check_duplicate, detect_conflicts,
-            or suggest_supersedes is True.
+            Dict with entry_id, action, and optional detection info.
         """
         entry = ContextEntry(
             content=content,
@@ -543,20 +541,18 @@ class ContextStore:
         # Create initial version record
         self._create_version(entry, "created", version=1)
 
-        # Build return value based on what was requested
-        # Maintain backward compatibility: only return dict if explicitly requested
-        if check_duplicate or detect_conflicts or suggest_supersedes:
-            return {
-                "entry_id": entry.id,
-                "action": "created",
-                "duplicate_of": None,
-                "similarity": None,
-                "potential_conflicts": potential_conflicts if detect_conflicts else [],
-                "supersedes_candidates": supersedes_candidates if suggest_supersedes else [],
-            }
-
-        # Default: return just the entry ID (backward compatible)
-        return entry.id
+        # Always return a dict with consistent structure
+        result: dict[str, Any] = {
+            "entry_id": entry.id,
+            "action": "created",
+            "duplicate_of": None,
+            "similarity": None,
+        }
+        if detect_conflicts:
+            result["potential_conflicts"] = potential_conflicts
+        if suggest_supersedes:
+            result["supersedes_candidates"] = supersedes_candidates
+        return result
 
     def recall(
         self,
@@ -804,6 +800,264 @@ class ContextStore:
                 )
 
             return result.rowcount > 0
+
+    def restore(self, entry_id: str) -> bool:
+        """Restore a soft-deleted (deprecated) entry.
+
+        Args:
+            entry_id: The ID of the entry to restore.
+
+        Returns:
+            True if entry was found and restored.
+        """
+        with self._write_transaction() as conn:
+            result = conn.execute(
+                "UPDATE context_entries SET is_deprecated = 0, updated_at = ? WHERE id = ? AND is_deprecated = 1",
+                (datetime.now(UTC).replace(tzinfo=None).isoformat(), entry_id),
+            )
+            if result.rowcount > 0:
+                self._record_version(conn, entry_id, "restored")
+                return True
+            return False
+
+    def _record_version(
+        self, conn: sqlite3.Connection, entry_id: str, change_type: str
+    ) -> None:
+        """Record a version in the history table from within an existing transaction."""
+        row = conn.execute(
+            "SELECT * FROM context_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not row:
+            return
+        entry = self._row_to_entry(dict(row))
+        max_version = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM context_versions WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO context_versions
+               (id, entry_id, version, content, content_type, confidence, tags, change_type, changed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid.uuid4()),
+                entry_id,
+                max_version + 1,
+                entry.content,
+                entry.content_type.value if hasattr(entry.content_type, "value") else str(entry.content_type),
+                entry.confidence,
+                json.dumps(entry.tags),
+                change_type,
+                datetime.now(UTC).replace(tzinfo=None).isoformat(),
+            ),
+        )
+
+    def search_by_tags(
+        self,
+        tags: list[str],
+        match_all: bool = False,
+        limit: int = 20,
+        include_deprecated: bool = False,
+    ) -> list[ContextEntry]:
+        """Find entries by tags.
+
+        Args:
+            tags: Tags to search for.
+            match_all: If True, entries must have ALL specified tags.
+            limit: Maximum number of results.
+            include_deprecated: Whether to include deprecated entries.
+
+        Returns:
+            List of matching entries.
+        """
+        if not tags:
+            return []
+
+        with self._read_transaction() as conn:
+            if match_all:
+                conditions = " AND ".join(
+                    "EXISTS (SELECT 1 FROM json_each(ce.tags) WHERE json_each.value = ?)"
+                    for _ in tags
+                )
+            else:
+                conditions = " OR ".join(
+                    "EXISTS (SELECT 1 FROM json_each(ce.tags) WHERE json_each.value = ?)"
+                    for _ in tags
+                )
+
+            deprecated_filter = "" if include_deprecated else "AND ce.is_deprecated = 0"
+            sql = f"""
+                SELECT ce.* FROM context_entries ce
+                WHERE ({conditions}) {deprecated_filter}
+                ORDER BY ce.updated_at DESC
+                LIMIT ?
+            """
+            rows = conn.execute(sql, (*tags, limit)).fetchall()
+            return [self._row_to_entry(dict(row)) for row in rows]
+
+    def export_entries(
+        self,
+        scope_level: ScopeLevel | str | None = None,
+        scope_path: str | None = None,
+        include_deprecated: bool = False,
+    ) -> dict[str, Any]:
+        """Export entries and edges as a serializable dict.
+
+        Args:
+            scope_level: Optional filter by scope level.
+            scope_path: Optional filter by scope path (prefix match).
+            include_deprecated: Whether to include deprecated entries.
+
+        Returns:
+            Dict with entries and edges lists.
+        """
+        with self._read_transaction() as conn:
+            where_clauses: list[str] = []
+            params: list[Any] = []
+            if not include_deprecated:
+                where_clauses.append("is_deprecated = 0")
+            if scope_level:
+                where_clauses.append("scope_level = ?")
+                params.append(
+                    str(scope_level.value)
+                    if isinstance(scope_level, ScopeLevel)
+                    else str(scope_level)
+                )
+            if scope_path:
+                where_clauses.append("scope_path LIKE ?")
+                params.append(f"{scope_path}%")
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            rows = conn.execute(
+                f"SELECT * FROM context_entries {where_sql}", params
+            ).fetchall()
+            entries = [self._row_to_entry(dict(row)) for row in rows]
+            entry_ids = {e.id for e in entries}
+
+            if entry_ids:
+                placeholders = ",".join("?" * len(entry_ids))
+                edge_rows = conn.execute(
+                    f"SELECT * FROM context_edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    (*entry_ids, *entry_ids),
+                ).fetchall()
+                edges = [
+                    self._row_to_edge(dict(row))
+                    for row in edge_rows
+                    if dict(row)["source_id"] in entry_ids
+                    and dict(row)["target_id"] in entry_ids
+                ]
+            else:
+                edges = []
+
+            return {
+                "version": "1.0",
+                "export_date": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                "entries": [e.model_dump(mode="json") for e in entries],
+                "edges": [e.model_dump(mode="json") for e in edges],
+            }
+
+    def import_entries(
+        self, data: dict[str, Any], skip_duplicates: bool = True
+    ) -> dict[str, int]:
+        """Import entries and edges from an export dict.
+
+        Args:
+            data: Export dict from export_entries().
+            skip_duplicates: Skip entries whose IDs already exist.
+
+        Returns:
+            Dict with import counts.
+        """
+        entries_imported = 0
+        edges_imported = 0
+        entries_skipped = 0
+
+        with self._write_transaction() as conn:
+            for entry_data in data.get("entries", []):
+                entry_id = entry_data.get("id")
+                if not entry_id:
+                    entries_skipped += 1
+                    continue
+
+                existing = conn.execute(
+                    "SELECT id FROM context_entries WHERE id = ?", (entry_id,)
+                ).fetchone()
+                if existing and skip_duplicates:
+                    entries_skipped += 1
+                    continue
+
+                entry = ContextEntry(**entry_data)
+                embedding = self._engine.embed(entry.content)
+
+                conn.execute(
+                    """INSERT OR REPLACE INTO context_entries (
+                        id, content, content_type, scope_level, scope_path,
+                        confidence, created_at, updated_at, accessed_at,
+                        access_count, source_type, source_ref, tags, metadata, is_deprecated
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry.id,
+                        entry.content,
+                        entry.content_type.value,
+                        entry.scope_level.value,
+                        entry.scope_path,
+                        entry.confidence,
+                        entry.created_at.isoformat(),
+                        entry.updated_at.isoformat(),
+                        entry.accessed_at.isoformat() if entry.accessed_at else None,
+                        entry.access_count,
+                        entry.source_type.value if entry.source_type else None,
+                        entry.source_ref,
+                        json.dumps(entry.tags),
+                        json.dumps(entry.metadata),
+                        int(entry.is_deprecated),
+                    ),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO context_vectors (entry_id, embedding) VALUES (?, ?)",
+                    (entry.id, serialize_embedding(embedding)),
+                )
+                entries_imported += 1
+
+            for edge_data in data.get("edges", []):
+                source_id = edge_data.get("source_id")
+                target_id = edge_data.get("target_id")
+                if not source_id or not target_id:
+                    continue
+
+                source_exists = conn.execute(
+                    "SELECT id FROM context_entries WHERE id = ?", (source_id,)
+                ).fetchone()
+                target_exists = conn.execute(
+                    "SELECT id FROM context_entries WHERE id = ?", (target_id,)
+                ).fetchone()
+                if not source_exists or not target_exists:
+                    continue
+
+                edge = ContextEdge(**edge_data)
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO context_edges (
+                            id, source_id, target_id, edge_type, confidence, created_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            edge.id,
+                            edge.source_id,
+                            edge.target_id,
+                            edge.edge_type.value,
+                            edge.confidence,
+                            edge.created_at.isoformat(),
+                            json.dumps(edge.metadata),
+                        ),
+                    )
+                    edges_imported += 1
+                except sqlite3.IntegrityError:
+                    pass
+
+        return {
+            "entries_imported": entries_imported,
+            "edges_imported": edges_imported,
+            "entries_skipped": entries_skipped,
+        }
 
     def get(self, entry_id: str) -> ContextEntry | None:
         """
