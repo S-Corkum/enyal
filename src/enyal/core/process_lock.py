@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import IO
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class ProcessLock:
 
     def __init__(self, db_path: Path):
         self.lock_path = db_path.parent / ".enyal.lock"
-        self._lock_file: object | None = None
+        self._lock_file: IO[str] | None = None
         self._locked: bool = False
 
     def acquire(self) -> bool:
@@ -68,7 +69,7 @@ class ProcessLock:
         import msvcrt
 
         try:
-            msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[union-attr]
+            msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[union-attr, attr-defined]
             self._write_pid()
             self._locked = True
             logger.info(f"Process lock acquired (PID {os.getpid()})")
@@ -111,12 +112,12 @@ class ProcessLock:
             else:
                 import fcntl
 
-                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[union-attr]
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
         except Exception:
             pass
 
         with contextlib.suppress(Exception):
-            self._lock_file.close()  # type: ignore[union-attr]
+            self._lock_file.close()
         self._lock_file = None
         self._locked = False
 

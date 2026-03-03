@@ -380,7 +380,7 @@ class TestGetModelSSLAutoRecovery:
         mock_model = MagicMock()
         call_count = 0
 
-        def side_effect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        def side_effect(*_args: object, **_kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:

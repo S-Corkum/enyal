@@ -3,9 +3,7 @@
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, mock_open, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from enyal.core.process_lock import ProcessLock
 
@@ -67,9 +65,11 @@ class TestProcessLockAcquire:
         """Test acquire when lock file cannot be created."""
         lock = ProcessLock(Path("/nonexistent/path/context.db"))
         # Patch Path.mkdir at the class level to succeed, but open to fail
-        with patch("pathlib.Path.mkdir"):
-            with patch("builtins.open", side_effect=OSError("Permission denied")):
-                result = lock.acquire()
+        with (
+            patch("pathlib.Path.mkdir"),
+            patch("builtins.open", side_effect=OSError("Permission denied")),
+        ):
+            result = lock.acquire()
 
         assert result is False
         assert lock.is_locked is False
@@ -86,7 +86,7 @@ class TestProcessLockAcquire:
             # Second lock should fail (same process, but flock is per file descriptor)
             # Note: flock allows re-locking from same process with different fd on some systems
             # We just verify the mechanism works without error
-            result2 = lock2.acquire()
+            lock2.acquire()
             # On most Unix systems this succeeds from same process
             # The real protection is cross-process
 

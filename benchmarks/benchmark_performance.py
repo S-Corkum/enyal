@@ -11,7 +11,6 @@ Validates the following targets:
 
 import argparse
 import gc
-import os
 import statistics
 import sys
 import tempfile
@@ -123,7 +122,7 @@ def benchmark_cold_start(db_path: Path) -> BenchmarkResult:
 
         store = ContextStore(db_path)
         start = time.perf_counter()
-        results = store.recall("programming concepts", limit=5)
+        store.recall("programming concepts", limit=5)
         elapsed = time.perf_counter() - start
         latencies.append(elapsed)
         store.close()
@@ -141,8 +140,8 @@ def benchmark_warm_query(db_path: Path, num_entries: int = 1000, iterations: int
     """
     print(f"\n=== Warm Query Benchmark ({num_entries} entries) ===")
 
-    from enyal.core.store import ContextStore
     from enyal.core.retrieval import RetrievalEngine
+    from enyal.core.store import ContextStore
 
     # Populate database
     store = ContextStore(db_path)
@@ -193,7 +192,7 @@ def benchmark_warm_query(db_path: Path, num_entries: int = 1000, iterations: int
     for i in range(iterations):
         query = queries[i % len(queries)]
         start = time.perf_counter()
-        results = retrieval.search(query, limit=10)
+        retrieval.search(query, limit=10)
         elapsed = time.perf_counter() - start
         latencies.append(elapsed)
 
@@ -235,8 +234,8 @@ def benchmark_concurrent_reads(
     """
     print(f"\n=== Concurrent Reads Benchmark ({num_threads} threads) ===")
 
-    from enyal.core.store import ContextStore
     from enyal.core.retrieval import RetrievalEngine
+    from enyal.core.store import ContextStore
 
     # Populate database
     store = ContextStore(db_path)
@@ -247,7 +246,7 @@ def benchmark_concurrent_reads(
     all_latencies: list[float] = []
     lock = threading.Lock()
 
-    def worker(thread_id: int) -> list[float]:
+    def worker(_thread_id: int) -> list[float]:
         thread_latencies = []
         store = ContextStore(db_path)
         retrieval = RetrievalEngine(store)
@@ -286,8 +285,8 @@ def benchmark_memory_footprint(num_entries: int = 1000) -> dict:
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "memory_test.db"
 
-        from enyal.core.store import ContextStore
         from enyal.core.retrieval import RetrievalEngine
+        from enyal.core.store import ContextStore
 
         store = ContextStore(db_path)
 
@@ -331,7 +330,7 @@ def benchmark_memory_footprint(num_entries: int = 1000) -> dict:
         "mb_per_1k_entries": (final_current - baseline_current) / 1024 / 1024 / (num_entries / 1000),
     }
 
-    print(f"\n  Results:")
+    print("\n  Results:")
     print(f"    After inserts: {result['after_inserts_mb']:.2f} MB")
     print(f"    Peak memory:   {result['peak_mb']:.2f} MB")
     print(f"    DB file size:  {result['db_size_mb']:.2f} MB")

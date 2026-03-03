@@ -7,7 +7,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from enyal.embeddings.engine import EmbeddingEngine
@@ -213,7 +213,7 @@ class MigrationManager:
             contents = [row[1] for row in entries]
 
             # Batch embed with progress logging
-            all_embeddings: list[np.ndarray] = []
+            all_embeddings: list[np.ndarray[Any, Any]] = []
             batch_size = 32
             for i in range(0, total, batch_size):
                 batch = contents[i : i + batch_size]

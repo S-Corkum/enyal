@@ -41,14 +41,17 @@ Security Notes:
     - Use ENYAL_OFFLINE_MODE with pre-downloaded models for air-gapped environments
 """
 
+import contextlib
 import hashlib
 import logging
 import os
 import platform
+import ssl
 import subprocess
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +348,7 @@ def _try_inject_truststore() -> bool:
         True if truststore was successfully injected, False otherwise.
     """
     try:
-        import truststore  # type: ignore[import-untyped,unused-ignore]
+        import truststore  # type: ignore[import-not-found]
 
         truststore.inject_into_ssl()
         logger.info("SSL: Using OS native trust store (truststore package)")
@@ -553,7 +556,7 @@ def _relax_x509_strict() -> None:
         return  # Python < 3.10, flag doesn't exist
 
     # ── Layer 1: Zero in the ssl module ────────────────────────────────
-    ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+    ssl.VERIFY_X509_STRICT = 0  # type: ignore[misc, assignment]
 
     # ── Layer 2: Zero in urllib3's module namespace ────────────────────
     # urllib3.util.ssl_ does `from ssl import VERIFY_X509_STRICT` at import
@@ -563,7 +566,7 @@ def _relax_x509_strict() -> None:
         import urllib3.util.ssl_ as _urllib3_ssl
 
         if hasattr(_urllib3_ssl, "VERIFY_X509_STRICT"):
-            _urllib3_ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+            _urllib3_ssl.VERIFY_X509_STRICT = 0
             logger.debug("Zeroed urllib3.util.ssl_.VERIFY_X509_STRICT")
     except (ImportError, AttributeError):
         pass
@@ -610,12 +613,12 @@ def _disable_ssl_globally() -> None:
     # urllib3 captures `VERIFY_X509_STRICT` at import time via
     # `from ssl import VERIFY_X509_STRICT`, so we must zero BOTH copies.
     if hasattr(ssl, "VERIFY_X509_STRICT"):
-        ssl.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+        ssl.VERIFY_X509_STRICT = 0  # type: ignore[misc, assignment]
     try:
         import urllib3.util.ssl_ as _urllib3_ssl_mod
 
         if hasattr(_urllib3_ssl_mod, "VERIFY_X509_STRICT"):
-            _urllib3_ssl_mod.VERIFY_X509_STRICT = 0  # type: ignore[attr-defined]
+            _urllib3_ssl_mod.VERIFY_X509_STRICT = 0
     except (ImportError, AttributeError):
         pass
 
@@ -631,23 +634,21 @@ def _disable_ssl_globally() -> None:
         def _permissive_urllib3_context(
             *args: object, **kwargs: object
         ) -> ssl.SSLContext:
-            ctx = _original_create_ctx(*args, **kwargs)
+            ctx = _original_create_ctx(*args, **kwargs)  # type: ignore[arg-type]
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            try:
+            with contextlib.suppress(ssl.SSLError):
                 ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-            except ssl.SSLError:
-                pass
             return ctx
 
-        _urllib3_ssl.create_urllib3_context = _permissive_urllib3_context  # type: ignore[assignment]
+        _urllib3_ssl.create_urllib3_context = _permissive_urllib3_context
 
         # Also patch the direct import in urllib3.connection
         try:
             import urllib3.connection as _urllib3_conn
 
             if hasattr(_urllib3_conn, "create_urllib3_context"):
-                _urllib3_conn.create_urllib3_context = _permissive_urllib3_context  # type: ignore[attr-defined]
+                _urllib3_conn.create_urllib3_context = _permissive_urllib3_context
         except (ImportError, AttributeError):
             pass
 
@@ -905,10 +906,8 @@ def _build_ssl_context(
             ctx.load_verify_locations(cert_file)
 
     # Lower OpenSSL security level for corporate environments (SHA-1 certs, etc.)
-    try:
+    with contextlib.suppress(_ssl.SSLError):
         ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-    except _ssl.SSLError:
-        pass
 
     return ctx
 
@@ -946,11 +945,11 @@ def _create_corp_adapter(ssl_context: "ssl.SSLContext") -> object:
     class _Adapter(HTTPAdapter):
         def init_poolmanager(self, *args: object, **kwargs: object) -> object:
             kwargs["ssl_context"] = ssl_context
-            return super().init_poolmanager(*args, **kwargs)
+            return super().init_poolmanager(*args, **kwargs)  # type: ignore[no-untyped-call]
 
         def proxy_manager_for(self, proxy: object, **proxy_kwargs: object) -> object:
             proxy_kwargs["ssl_context"] = ssl_context
-            return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[arg-type]
+            return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[no-untyped-call]
 
     return _Adapter()
 
@@ -1001,7 +1000,7 @@ def configure_http_backend(config: SSLConfig | None = None) -> None:
         # Mount our adapter that injects the SSL context, completely
         # bypassing urllib3's create_urllib3_context()
         adapter = _create_corp_adapter(ssl_ctx)
-        session.mount("https://", adapter)
+        session.mount("https://", adapter)  # type: ignore[arg-type]
 
         # Configure SSL verification (verify=False takes highest priority)
         if not config.verify:
@@ -1074,7 +1073,7 @@ def check_ssl_health() -> dict[str, str | bool | None]:
     truststore_available = False
     truststore_version: str | None = None
     try:
-        import truststore  # type: ignore[import-untyped,unused-ignore]
+        import truststore
 
         truststore_available = True
         truststore_version = getattr(truststore, "__version__", "installed")
@@ -1174,9 +1173,9 @@ def _preflight_ssl_check(
         # hardcoded OpenSSL constant (not the potentially-zeroed Python attr).
         ctx.verify_flags |= _OPENSSL_X509_STRICT
 
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host):
-                return True, None
+        with socket.create_connection((host, port), timeout=timeout) as sock, \
+                ctx.wrap_socket(sock, server_hostname=host):
+            return True, None
     except Exception as e:
         return False, f"{type(e).__qualname__}: {e}"
 
@@ -1340,10 +1339,11 @@ def download_model(
     # Look up model config to get trust_remote_code and other settings
     from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
 
-    kwargs: dict[str, object] = {}
+    kwargs: dict[str, Any] = {}
     if cache_dir:
         kwargs["cache_folder"] = cache_dir
 
+    model_config: ModelConfig | None
     if model_name in MODEL_REGISTRY:
         model_config = MODEL_REGISTRY[model_name]
     else:
@@ -1430,7 +1430,7 @@ def verify_model(model_path: str | None = None) -> bool:
         # Look up model config to get trust_remote_code
         from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
 
-        kwargs: dict[str, object] = {}
+        kwargs: dict[str, Any] = {}
 
         # Check registry by path or by model name
         model_config = MODEL_REGISTRY.get(path)

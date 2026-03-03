@@ -666,10 +666,12 @@ class TestCmdServe:
             json=False,
         )
 
-        with patch("enyal.cli.main.main") as mock_server_main:
+        with (
+            patch("enyal.cli.main.main"),
             # We need to patch the imported main from mcp.server
-            with patch.dict("sys.modules", {"enyal.mcp.server": MagicMock()}):
-                with patch("enyal.cli.main.main") as _:
+            patch.dict("sys.modules", {"enyal.mcp.server": MagicMock()}),
+            patch("enyal.cli.main.main") as _,
+        ):
                     # Patch the import inside cmd_serve
                     mock_module = MagicMock()
                     with patch.dict("sys.modules", {"enyal.mcp": MagicMock(), "enyal.mcp.server": mock_module}):
@@ -756,7 +758,7 @@ class TestCmdModelDownload:
             captured = capsys.readouterr()
             assert "downloaded successfully" in captured.out
 
-    def test_cmd_model_download_custom_model(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cmd_model_download_custom_model(self) -> None:
         """Test model download with custom model name."""
         args = argparse.Namespace(
             model="custom-model-v2",
@@ -790,7 +792,7 @@ class TestCmdModelDownload:
             assert result == 0
             captured = capsys.readouterr()
             # cmd_model_download prints status lines before JSON; extract last line
-            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            json_line = [ln for ln in captured.out.strip().split("\n") if ln.startswith("{")][-1]
             output = json.loads(json_line)
             assert output["success"] is True
 
@@ -828,7 +830,7 @@ class TestCmdModelDownload:
 
             assert result == 1
             captured = capsys.readouterr()
-            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            json_line = [ln for ln in captured.out.strip().split("\n") if ln.startswith("{")][-1]
             output = json.loads(json_line)
             assert output["success"] is False
 
@@ -885,7 +887,7 @@ class TestCmdModelVerify:
 
             assert result == 0
             captured = capsys.readouterr()
-            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            json_line = [ln for ln in captured.out.strip().split("\n") if ln.startswith("{")][-1]
             output = json.loads(json_line)
             assert output["success"] is True
 
@@ -904,7 +906,7 @@ class TestCmdModelVerify:
 
             assert result == 1
             captured = capsys.readouterr()
-            json_line = [l for l in captured.out.strip().split("\n") if l.startswith("{")][-1]
+            json_line = [ln for ln in captured.out.strip().split("\n") if ln.startswith("{")][-1]
             output = json.loads(json_line)
             assert output["success"] is False
 

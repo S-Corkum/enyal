@@ -1242,7 +1242,7 @@ class TestEnyalTraverse:
 
             assert result.success is True
 
-    def test_enyal_traverse_value_error(self, server_module, sample_entry) -> None:
+    def test_enyal_traverse_value_error(self, server_module) -> None:
         """Test traverse with invalid relation type raises validation error."""
         with pytest.raises(ValidationError):
             server_module.TraverseInput(

@@ -1,5 +1,6 @@
 """Tests for SSL configuration module."""
 
+import contextlib
 import importlib
 import os
 import ssl
@@ -949,7 +950,7 @@ class TestDisableSSLGlobally:
             import urllib3
 
             # Check that the warning filter was added
-            with warnings.catch_warnings(record=True) as w:
+            with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
                 # This should NOT produce a warning after _disable_ssl_globally
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1034,7 +1035,8 @@ class TestExportMacosSystemCerts:
 
             assert result is not None
             assert os.path.isfile(result)
-            content = open(result).read()
+            with open(result) as f:
+                content = f.read()
             assert "-----BEGIN CERTIFICATE-----" in content
 
     def test_returns_none_when_security_fails(self) -> None:
@@ -1323,10 +1325,8 @@ class TestDisableSSLGloballyUrllib3Patch:
             ssl._create_default_https_context = original_ctx
             if original_strict is not None:
                 ssl.VERIFY_X509_STRICT = original_strict
-            try:
+            with contextlib.suppress(Exception):
                 _urllib3_ssl.create_urllib3_context = original_create
-            except Exception:
-                pass
 
     def test_zeroes_verify_x509_strict(self) -> None:
         """Test that _disable_ssl_globally zeroes VERIFY_X509_STRICT."""
@@ -1345,10 +1345,8 @@ class TestDisableSSLGloballyUrllib3Patch:
         finally:
             ssl._create_default_https_context = original_ctx
             ssl.VERIFY_X509_STRICT = original_strict
-            try:
+            with contextlib.suppress(Exception):
                 _urllib3_ssl.create_urllib3_context = original_create
-            except Exception:
-                pass
 
     def test_patches_urllib3_connection_binding(self) -> None:
         """Test that urllib3.connection's direct import is also patched."""
@@ -1373,10 +1371,8 @@ class TestDisableSSLGloballyUrllib3Patch:
             ssl._create_default_https_context = original_ctx
             if original_strict is not None:
                 ssl.VERIFY_X509_STRICT = original_strict
-            try:
+            with contextlib.suppress(Exception):
                 _urllib3_ssl.create_urllib3_context = original_create
-            except Exception:
-                pass
 
 
 class TestRelaxX509Strict:
@@ -1500,10 +1496,10 @@ class TestPreflightSSLCheck:
             patch("ssl.create_default_context") as mock_ctx,
         ):
             mock_sock = MagicMock()
-            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__enter__ = lambda _: mock_sock
             mock_conn.return_value.__exit__ = MagicMock(return_value=False)
             mock_ctx.return_value.wrap_socket.return_value.__enter__ = (
-                lambda s: MagicMock()
+                lambda _: MagicMock()
             )
             mock_ctx.return_value.wrap_socket.return_value.__exit__ = MagicMock(
                 return_value=False
@@ -1520,10 +1516,10 @@ class TestPreflightSSLCheck:
             patch("ssl.create_default_context") as mock_ctx,
         ):
             mock_sock = MagicMock()
-            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__enter__ = lambda _: mock_sock
             mock_conn.return_value.__exit__ = MagicMock(return_value=False)
             mock_ctx.return_value.wrap_socket.return_value.__enter__ = (
-                lambda s: MagicMock()
+                lambda _: MagicMock()
             )
             mock_ctx.return_value.wrap_socket.return_value.__exit__ = MagicMock(
                 return_value=False
@@ -1540,7 +1536,7 @@ class TestPreflightSSLCheck:
             patch("ssl.create_default_context") as mock_ctx,
         ):
             mock_sock = MagicMock()
-            mock_conn.return_value.__enter__ = lambda s: mock_sock
+            mock_conn.return_value.__enter__ = lambda _: mock_sock
             mock_conn.return_value.__exit__ = MagicMock(return_value=False)
             mock_ctx.return_value.wrap_socket.side_effect = ssl.SSLError(
                 "CA cert not marked as critical"
