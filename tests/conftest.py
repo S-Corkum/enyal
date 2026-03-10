@@ -38,6 +38,12 @@ def mock_embedding() -> NDArray[np.float32]:
 
 
 @pytest.fixture
+def mock_embedding_512() -> NDArray[np.float32]:
+    """Return a mock 512-dimensional embedding."""
+    return np.random.rand(512).astype(np.float32)
+
+
+@pytest.fixture
 def mock_embedding_768() -> NDArray[np.float32]:
     """Return a mock 768-dimensional embedding."""
     return np.random.rand(768).astype(np.float32)
@@ -45,8 +51,8 @@ def mock_embedding_768() -> NDArray[np.float32]:
 
 @pytest.fixture
 def mock_model_config() -> ModelConfig:
-    """Return the default nomic model config for tests."""
-    return MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+    """Return the default Qwen3 model config for tests."""
+    return MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
 
 
 @pytest.fixture
@@ -56,14 +62,14 @@ def mock_model_config_384() -> ModelConfig:
 
 
 @pytest.fixture
-def mock_embedding_engine(mock_embedding_768: NDArray[np.float32]) -> MagicMock:
+def mock_embedding_engine(mock_embedding_512: NDArray[np.float32]) -> MagicMock:
     """Create a mock EmbeddingEngine instance to avoid model loading in tests."""
     engine = MagicMock()
-    engine.config = MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
-    engine.embed.return_value = mock_embedding_768
-    engine.embed_query.return_value = mock_embedding_768
-    engine.embed_batch.return_value = np.zeros((0, 768), dtype=np.float32)
-    engine.embedding_dimension.return_value = 768
+    engine.config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+    engine.embed.return_value = mock_embedding_512
+    engine.embed_query.return_value = mock_embedding_512
+    engine.embed_batch.return_value = np.zeros((0, 512), dtype=np.float32)
+    engine.embedding_dimension.return_value = 512
     engine.is_loaded.return_value = False
     engine._model = None
     return engine

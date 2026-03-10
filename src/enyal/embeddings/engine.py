@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -145,6 +146,24 @@ class EmbeddingEngine:
             kwargs: dict[str, Any] = {}
             if self._config.trust_remote_code:
                 kwargs["trust_remote_code"] = True
+            if self._config.truncate_dim is not None:
+                kwargs["truncate_dim"] = self._config.truncate_dim
+
+            # Workaround: Qwen3 SDPA produces NaN on macOS (Intel + Apple Silicon)
+            # https://github.com/huggingface/sentence-transformers/issues/3498
+            if sys.platform == "darwin":
+                kwargs.setdefault("model_kwargs", {})
+                kwargs["model_kwargs"]["attn_implementation"] = "eager"
+
+            # Guard: nomic models require einops (now optional)
+            if "nomic" in self._config.name.lower():
+                try:
+                    import einops  # noqa: F401
+                except ImportError:
+                    raise ImportError(
+                        "The nomic embedding model requires 'einops'. "
+                        "Install it with: pip install enyal[nomic]"
+                    ) from None
 
             try:
                 self._model = SentenceTransformer(model_path, **kwargs)
@@ -226,7 +245,8 @@ class EmbeddingEngine:
         """
         Generate embedding for a search query.
 
-        Applies the query_prefix from config before encoding.
+        Uses prompt_name for models that support it (e.g., Qwen3),
+        otherwise applies the query_prefix before encoding.
         Output is L2-normalized to unit length.
 
         Args:
@@ -235,9 +255,16 @@ class EmbeddingEngine:
         Returns:
             A unit-length float32 numpy array of shape (dimension,).
         """
-        prefixed = f"{self._config.query_prefix}{text}"
         model = self.get_model()
-        embedding: Any = model.encode(prefixed, convert_to_numpy=True)
+        if self._config.query_prompt_name:
+            embedding: Any = model.encode(
+                text,
+                prompt_name=self._config.query_prompt_name,
+                convert_to_numpy=True,
+            )
+        else:
+            prefixed = f"{self._config.query_prefix}{text}"
+            embedding = model.encode(prefixed, convert_to_numpy=True)
         result: NDArray[np.float32] = embedding.astype(np.float32)
         return self._normalize(result)
 
@@ -263,16 +290,24 @@ class EmbeddingEngine:
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, self._config.dimension)
 
-        prefix = self._config.document_prefix if task == "document" else self._config.query_prefix
-        prefixed = [f"{prefix}{t}" for t in texts]
-
         model = self.get_model()
-        embeddings: Any = model.encode(
-            prefixed,
-            convert_to_numpy=True,
-            batch_size=batch_size,
-            show_progress_bar=len(texts) > 100,
-        )
+
+        encode_kwargs: dict[str, Any] = {
+            "convert_to_numpy": True,
+            "batch_size": batch_size,
+            "show_progress_bar": len(texts) > 100,
+        }
+
+        if task == "query" and self._config.query_prompt_name:
+            encode_kwargs["prompt_name"] = self._config.query_prompt_name
+            input_texts = list(texts)
+        else:
+            prefix = (
+                self._config.document_prefix if task == "document" else self._config.query_prefix
+            )
+            input_texts = [f"{prefix}{t}" for t in texts]
+
+        embeddings: Any = model.encode(input_texts, **encode_kwargs)
         result: NDArray[np.float32] = embeddings.astype(np.float32)
         return self._normalize(result)
 

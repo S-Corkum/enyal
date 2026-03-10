@@ -17,7 +17,7 @@ required-markers = [
 ]
 
 [manifest]
-constraints = [{ name = "transformers", specifier = ">=4.41.0,<5.0.0" }]
+constraints = [{ name = "transformers", specifier = ">=4.51.0,<5.0.0" }]
 
 [[package]]
 name = "annotated-doc"
@@ -576,10 +576,9 @@ wheels = [
 
 [[package]]
 name = "enyal"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
-    { name = "einops" },
     { name = "fastmcp" },
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.4.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
@@ -600,6 +599,9 @@ dev = [
     { name = "ruff" },
     { name = "types-requests" },
 ]
+nomic = [
+    { name = "einops" },
+]
 onnx = [
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
@@ -608,7 +610,7 @@ onnx = [
 
 [package.metadata]
 requires-dist = [
-    { name = "einops", specifier = ">=0.8.0" },
+    { name = "einops", marker = "extra == 'nomic'", specifier = ">=0.8.0" },
     { name = "fastmcp", specifier = ">=2.13.0,<3.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
     { name = "numpy", marker = "python_full_version < '3.13'", specifier = ">=1.26.0,<2.0.0" },
@@ -625,7 +627,7 @@ requires-dist = [
     { name = "truststore", marker = "extra == 'corporate'", specifier = ">=0.10.0" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.0" },
 ]
-provides-extras = ["dev", "corporate", "onnx"]
+provides-extras = ["dev", "nomic", "corporate", "onnx"]
 
 [[package]]
 name = "exceptiongroup"

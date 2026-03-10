@@ -25,18 +25,20 @@ class ModelConfig:
     query_prefix: str = ""
     max_seq_length: int = 512
     trust_remote_code: bool = False
+    query_prompt_name: str | None = None
+    truncate_dim: int | None = None
 
     @classmethod
     def default(cls) -> ModelConfig:
-        """Return the default model configuration (nomic-embed-text-v1.5)."""
-        return MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+        """Return the default model configuration (Qwen3-Embedding-0.6B)."""
+        return MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
 
     @classmethod
     def from_env(cls) -> ModelConfig:
         """Create a ModelConfig from environment variables.
 
         Reads:
-            ENYAL_MODEL_NAME: Model name (default: nomic-ai/nomic-embed-text-v1.5)
+            ENYAL_MODEL_NAME: Model name (default: Qwen/Qwen3-Embedding-0.6B)
             ENYAL_MODEL_DIMENSION: Override dimension for custom models
             ENYAL_TRUST_REMOTE_CODE: Override trust_remote_code (true/false)
 
@@ -61,6 +63,8 @@ class ModelConfig:
                     query_prefix=config.query_prefix,
                     max_seq_length=config.max_seq_length,
                     trust_remote_code=trust_override.lower() == "true",
+                    query_prompt_name=config.query_prompt_name,
+                    truncate_dim=config.truncate_dim,
                 )
             return config
 
@@ -82,6 +86,16 @@ class ModelConfig:
 
 
 MODEL_REGISTRY: dict[str, ModelConfig] = {
+    "Qwen/Qwen3-Embedding-0.6B": ModelConfig(
+        name="Qwen/Qwen3-Embedding-0.6B",
+        dimension=512,
+        document_prefix="",
+        query_prefix="",
+        max_seq_length=32768,
+        trust_remote_code=True,
+        query_prompt_name="query",
+        truncate_dim=512,
+    ),
     "nomic-ai/nomic-embed-text-v1.5": ModelConfig(
         name="nomic-ai/nomic-embed-text-v1.5",
         dimension=768,

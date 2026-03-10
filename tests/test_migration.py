@@ -21,6 +21,15 @@ def temp_db_path() -> Path:
 
 
 @pytest.fixture
+def mock_engine_512() -> MagicMock:
+    """Create a mock engine with 512-dim Qwen3 config."""
+    engine = MagicMock()
+    engine.config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+    engine.embed_batch.return_value = np.random.rand(0, 512).astype(np.float32)
+    return engine
+
+
+@pytest.fixture
 def mock_engine_768() -> MagicMock:
     """Create a mock engine with 768-dim nomic config."""
     engine = MagicMock()
@@ -239,11 +248,11 @@ class TestMigrationStatus:
         conn.close()
 
     def test_needs_migration_version_changed(
-        self, temp_db_path: Path, mock_engine_768: MagicMock
+        self, temp_db_path: Path, mock_engine_512: MagicMock
     ) -> None:
         """Test NEEDS_MIGRATION when embedding version differs."""
         _create_db_with_meta(
-            temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768, embedding_version="0"
+            temp_db_path, "Qwen/Qwen3-Embedding-0.6B", 512, embedding_version="0"
         )
         conn = sqlite3.connect(str(temp_db_path))
 
@@ -255,16 +264,16 @@ class TestMigrationStatus:
         except Exception:
             pytest.skip("sqlite-vec not available")
 
-        manager = MigrationManager(mock_engine_768)
+        manager = MigrationManager(mock_engine_512)
         status = manager.check_status(conn)
         assert status == MigrationStatus.NEEDS_MIGRATION
         conn.close()
 
     def test_needs_migration_no_version(
-        self, temp_db_path: Path, mock_engine_768: MagicMock
+        self, temp_db_path: Path, mock_engine_512: MagicMock
     ) -> None:
         """Test NEEDS_MIGRATION when embedding_version key is missing."""
-        _create_db_with_meta(temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768)
+        _create_db_with_meta(temp_db_path, "Qwen/Qwen3-Embedding-0.6B", 512)
         conn = sqlite3.connect(str(temp_db_path))
 
         try:
@@ -275,17 +284,17 @@ class TestMigrationStatus:
         except Exception:
             pytest.skip("sqlite-vec not available")
 
-        manager = MigrationManager(mock_engine_768)
+        manager = MigrationManager(mock_engine_512)
         status = manager.check_status(conn)
         assert status == MigrationStatus.NEEDS_MIGRATION
         conn.close()
 
-    def test_current_status_matches(self, temp_db_path: Path, mock_engine_768: MagicMock) -> None:
+    def test_current_status_matches(self, temp_db_path: Path, mock_engine_512: MagicMock) -> None:
         """Test CURRENT status when meta matches engine config."""
         _create_db_with_meta(
             temp_db_path,
-            "nomic-ai/nomic-embed-text-v1.5",
-            768,
+            "Qwen/Qwen3-Embedding-0.6B",
+            512,
             embedding_version=EMBEDDING_VERSION,
         )
         conn = sqlite3.connect(str(temp_db_path))
@@ -298,7 +307,7 @@ class TestMigrationStatus:
         except Exception:
             pytest.skip("sqlite-vec not available")
 
-        manager = MigrationManager(mock_engine_768)
+        manager = MigrationManager(mock_engine_512)
         status = manager.check_status(conn)
         assert status == MigrationStatus.CURRENT
         conn.close()
@@ -485,6 +494,57 @@ class TestMigrationExecution:
 
         conn.close()
 
+    def test_migrate_768_to_512(self, temp_db_path: Path, mock_engine_512: MagicMock) -> None:
+        """Test migrating from nomic 768-dim to Qwen3 512-dim."""
+        _create_db_with_meta(temp_db_path, "nomic-ai/nomic-embed-text-v1.5", 768)
+
+        conn = sqlite3.connect(str(temp_db_path))
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+        except Exception:
+            pytest.skip("sqlite-vec not available")
+
+        # Add an entry with 768-dim embedding
+        conn.execute(
+            "INSERT INTO context_entries (id, content) VALUES (?, ?)",
+            ("test-1", "test content for migration"),
+        )
+        embedding = np.random.rand(768).astype(np.float32)
+        conn.execute(
+            "INSERT INTO context_vectors (entry_id, embedding) VALUES (?, ?)",
+            ("test-1", struct.pack("768f", *embedding)),
+        )
+        conn.commit()
+
+        mock_engine_512.embed_batch.return_value = np.random.rand(1, 512).astype(np.float32)
+
+        manager = MigrationManager(mock_engine_512)
+        result = manager.migrate(conn)
+        conn.commit()
+
+        assert result.success is True
+        assert result.entries_migrated == 1
+        assert result.old_model == "nomic-ai/nomic-embed-text-v1.5"
+        assert result.old_dimension == 768
+        assert result.new_model == "Qwen/Qwen3-Embedding-0.6B"
+        assert result.new_dimension == 512
+
+        # Verify schema_meta updated
+        model_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'embedding_model'"
+        ).fetchone()
+        assert model_row[0] == "Qwen/Qwen3-Embedding-0.6B"
+
+        dim_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'embedding_dimension'"
+        ).fetchone()
+        assert dim_row[0] == "512"
+
+        conn.close()
+
     def test_migrate_failure_returns_error(
         self, temp_db_path: Path, mock_engine_768: MagicMock
     ) -> None:
@@ -517,7 +577,7 @@ class TestFreshSchema:
     """Tests for fresh schema creation."""
 
     def test_ensure_fresh_schema_creates_vectors(
-        self, temp_db_path: Path, mock_engine_768: MagicMock
+        self, temp_db_path: Path, mock_engine_512: MagicMock
     ) -> None:
         """Test that ensure_fresh_schema creates the vectors table."""
         conn = sqlite3.connect(str(temp_db_path))
@@ -529,7 +589,7 @@ class TestFreshSchema:
         except Exception:
             pytest.skip("sqlite-vec not available")
 
-        manager = MigrationManager(mock_engine_768)
+        manager = MigrationManager(mock_engine_512)
         manager.ensure_fresh_schema(conn)
         conn.commit()
 
@@ -543,12 +603,12 @@ class TestFreshSchema:
         model_row = conn.execute(
             "SELECT value FROM schema_meta WHERE key = 'embedding_model'"
         ).fetchone()
-        assert model_row[0] == "nomic-ai/nomic-embed-text-v1.5"
+        assert model_row[0] == "Qwen/Qwen3-Embedding-0.6B"
 
         dim_row = conn.execute(
             "SELECT value FROM schema_meta WHERE key = 'embedding_dimension'"
         ).fetchone()
-        assert dim_row[0] == "768"
+        assert dim_row[0] == "512"
 
         conn.close()
 

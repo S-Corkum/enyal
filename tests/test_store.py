@@ -26,13 +26,13 @@ def _word_based_embed(text: str) -> np.ndarray:
     producing similar vectors for texts with shared words.
     This gives realistic similarity behavior in tests.
     """
-    embedding = np.zeros(768, dtype=np.float32)
+    embedding = np.zeros(512, dtype=np.float32)
     words = text.lower().split()
     for word in words:
         # Each word activates a few dimensions based on its hash
         word_hash = hash(word) % (2**31)
         rng = np.random.RandomState(word_hash)
-        indices = rng.choice(768, size=min(10, 768), replace=False)
+        indices = rng.choice(512, size=min(10, 512), replace=False)
         embedding[indices] += rng.rand(len(indices)).astype(np.float32)
     # Normalize to unit vector
     norm = np.linalg.norm(embedding)
@@ -50,11 +50,11 @@ def mock_engine() -> MagicMock:
     similarity-based operations work realistically in tests.
     """
     engine = MagicMock()
-    engine.config = MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+    engine.config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
     engine.embed.side_effect = _word_based_embed
     engine.embed_query.side_effect = _word_based_embed
-    engine.embed_batch.return_value = np.zeros((0, 768), dtype=np.float32)
-    engine.embedding_dimension.return_value = 768
+    engine.embed_batch.return_value = np.zeros((0, 512), dtype=np.float32)
+    engine.embedding_dimension.return_value = 512
     return engine
 
 

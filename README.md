@@ -7,7 +7,7 @@ Enyal gives AI agents like Claude Code durable context that survives session res
 ## Features
 
 - **Persistent Memory**: Context survives restarts, crashes, and process termination
-- **Semantic Search**: Find relevant context using natural language queries (768-dim embeddings via nomic-embed-text-v1.5)
+- **Semantic Search**: Find relevant context using natural language queries (512-dim embeddings via Qwen3-Embedding-0.6B)
 - **Knowledge Graph**: Link related entries with relationships (supersedes, depends_on, conflicts_with, relates_to)
 - **Validity Tracking**: Automatically filter superseded entries and flag conflicts
 - **Entry Versioning**: Full history of changes with automatic version creation
@@ -511,6 +511,9 @@ conflicts = store.get_conflicted_entries()
 | `ENYAL_MODEL_PATH` | (none) | Path to local pre-downloaded model |
 | `ENYAL_HF_ENDPOINT` | (none) | Custom HuggingFace Hub endpoint URL (e.g., Artifactory proxy) |
 | `ENYAL_OFFLINE_MODE` | `false` | Prevent network calls (use with cached/local model) |
+| `ENYAL_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name (or any model in the registry) |
+| `ENYAL_ENABLE_RERANKER` | `false` | Enable post-retrieval reranking with Qwen3-Reranker-0.6B |
+| `ENYAL_RERANKER_MODEL` | `Qwen/Qwen3-Reranker-0.6B` | Reranker model name (setting this also enables reranking) |
 
 ### Database Location
 
@@ -566,7 +569,7 @@ uv pip install enyal --python 3.12 --system
 
 ### Slow First Query
 
-The first query loads the embedding model (~80MB). This takes ~1-2 seconds. Subsequent queries are fast (~34ms).
+The first query downloads and loads the embedding model (~1.2GB). The initial download may take several minutes depending on your network. Subsequent startups load from cache in a few seconds, and warm queries are fast (~34ms).
 
 **To pre-load the model at startup:**
 ```json
@@ -667,7 +670,7 @@ No additional authentication configuration is needed — Artifactory handles ups
 Enyal uses a unified SQLite database with:
 
 - **Relational storage** for metadata and attributes
-- **sqlite-vec** for vector similarity search (384-dim embeddings)
+- **sqlite-vec** for vector similarity search (512-dim embeddings via Matryoshka truncation)
 - **FTS5** for keyword search
 - **Knowledge graph** with typed edges (supersedes, depends_on, conflicts_with, relates_to)
 - **Version history** for change tracking
@@ -708,7 +711,9 @@ Benchmarked on Intel Mac with Python 3.12:
 | Concurrent reads (4 threads) | <150ms | ~85ms | ✓ |
 | Memory (100k entries estimated) | <500MB | ~35MB | ✓ |
 
-**Embedding model:** [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) (22M params, 384 dimensions)
+**Embedding model:** [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (600M params, 512 dimensions via Matryoshka truncation)
+
+> **Note:** Performance targets above were baselined with a smaller model and may differ with Qwen3. Run benchmarks on your hardware for current numbers.
 
 Run benchmarks:
 ```bash

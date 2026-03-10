@@ -1,9 +1,12 @@
 """Retrieval engine with hybrid search (semantic + keyword + recency)."""
 
+from __future__ import annotations
+
+import logging
 import math
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from enyal.core.store import ContextStore
 from enyal.models.context import (
@@ -11,6 +14,11 @@ from enyal.models.context import (
     ContextType,
     ScopeLevel,
 )
+
+if TYPE_CHECKING:
+    from enyal.embeddings.reranker import RerankerEngine
+
+logger = logging.getLogger(__name__)
 
 # Default decay rates by content type (multiplier for freshness_boost)
 # Higher values mean faster decay (more sensitive to time)
@@ -38,6 +46,8 @@ class RetrievalEngine:
         keyword_weight: float = 0.3,
         recency_weight: float = 0.1,
         confidence_half_life_days: int = 90,
+        reranker: RerankerEngine | None = None,
+        rerank_top_n: int = 20,
     ):
         """
         Initialize the retrieval engine.
@@ -48,12 +58,16 @@ class RetrievalEngine:
             keyword_weight: Weight for keyword match (0-1).
             recency_weight: Weight for recency (0-1).
             confidence_half_life_days: Days until confidence decays to half.
+            reranker: Optional reranker engine for post-retrieval reranking.
+            rerank_top_n: Number of top results to rerank (remainder kept as-is).
         """
         self.store = store
         self.semantic_weight = semantic_weight
         self.keyword_weight = keyword_weight
         self.recency_weight = recency_weight
         self.confidence_half_life_days = confidence_half_life_days
+        self.reranker = reranker
+        self.rerank_top_n = rerank_top_n
 
         # Normalize weights
         total = semantic_weight + keyword_weight + recency_weight
@@ -240,6 +254,10 @@ class RetrievalEngine:
                 )
             )
 
+        # Optional reranking step
+        if self.reranker is not None and valid_results:
+            valid_results = self._rerank_results(query, valid_results)
+
         # Sort by adjusted score
         valid_results.sort(key=lambda x: x.adjusted_score or x.score, reverse=True)
         return valid_results[:limit]
@@ -362,6 +380,56 @@ class RetrievalEngine:
         # BM25 scores are negative, with more negative being better
         # Convert: -10 -> ~0.91, -5 -> ~0.83, -1 -> ~0.5, 0 -> 0
         return 1.0 / (1.0 + abs(bm25_score)) if bm25_score < 0 else 0.0
+
+    def _rerank_results(
+        self,
+        query: str,
+        results: list[ContextSearchResult],
+    ) -> list[ContextSearchResult]:
+        """Rerank top results using the reranker engine.
+
+        Takes the top `rerank_top_n` results, scores them with the reranker,
+        and blends the reranker score with the existing adjusted score.
+
+        Args:
+            query: The search query.
+            results: Pre-sorted search results.
+
+        Returns:
+            Results with blended scores from reranking.
+        """
+        if self.reranker is None:
+            return results
+
+        top_results = results[: self.rerank_top_n]
+        remainder = results[self.rerank_top_n :]
+
+        documents = [r.entry.content for r in top_results]
+
+        try:
+            rerank_scores = self.reranker.rerank(query, documents)
+        except Exception:
+            logger.warning("Reranking failed, returning original results", exc_info=True)
+            return results
+
+        reranked: list[ContextSearchResult] = []
+        for result, rerank_score in zip(top_results, rerank_scores):
+            original_score = result.adjusted_score or result.score
+            blended = 0.7 * original_score + 0.3 * rerank_score
+            reranked.append(
+                ContextSearchResult(
+                    entry=result.entry,
+                    distance=result.distance,
+                    score=result.score,
+                    is_superseded=result.is_superseded,
+                    superseded_by=result.superseded_by,
+                    has_conflicts=result.has_conflicts,
+                    freshness_score=result.freshness_score,
+                    adjusted_score=blended,
+                )
+            )
+
+        return reranked + remainder
 
     def _get_applicable_scopes(self, file_path: Path) -> list[tuple[str, str | None]]:
         """

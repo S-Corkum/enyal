@@ -120,7 +120,14 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     # 2. Initialize store and retrieval eagerly
     try:
         _store = _create_store()
-        _retrieval = RetrievalEngine(_store)
+        reranker = None
+        if os.environ.get("ENYAL_RERANKER_MODEL") or os.environ.get(
+            "ENYAL_ENABLE_RERANKER", ""
+        ).lower() == "true":
+            from enyal.embeddings.reranker import RerankerEngine
+
+            reranker = RerankerEngine()
+        _retrieval = RetrievalEngine(_store, reranker=reranker)
         _verify_startup_health(_store)
     except Exception:
         logger.exception("Failed to initialize Enyal server during lifespan startup")
@@ -167,7 +174,14 @@ def get_retrieval() -> RetrievalEngine:
     """Get or create the retrieval engine instance."""
     global _retrieval
     if _retrieval is None:
-        _retrieval = RetrievalEngine(get_store())
+        reranker = None
+        if os.environ.get("ENYAL_RERANKER_MODEL") or os.environ.get(
+            "ENYAL_ENABLE_RERANKER", ""
+        ).lower() == "true":
+            from enyal.embeddings.reranker import RerankerEngine
+
+            reranker = RerankerEngine()
+        _retrieval = RetrievalEngine(get_store(), reranker=reranker)
     return _retrieval
 
 

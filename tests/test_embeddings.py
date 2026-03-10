@@ -13,18 +13,20 @@ from enyal.embeddings.models import MODEL_REGISTRY, ModelConfig
 class TestModelConfig:
     """Tests for ModelConfig dataclass and registry."""
 
-    def test_default_returns_nomic(self) -> None:
-        """Test that default() returns nomic-embed-text-v1.5 config."""
+    def test_default_returns_qwen3(self) -> None:
+        """Test that default() returns Qwen3-Embedding-0.6B config."""
         config = ModelConfig.default()
-        assert config.name == "nomic-ai/nomic-embed-text-v1.5"
-        assert config.dimension == 768
+        assert config.name == "Qwen/Qwen3-Embedding-0.6B"
+        assert config.dimension == 512
         assert config.trust_remote_code is True
 
-    def test_default_has_prefixes(self) -> None:
-        """Test that default config has search prefixes."""
+    def test_default_uses_prompt_name(self) -> None:
+        """Test that default config uses prompt_name instead of prefixes."""
         config = ModelConfig.default()
-        assert config.document_prefix == "search_document: "
-        assert config.query_prefix == "search_query: "
+        assert config.query_prompt_name == "query"
+        assert config.truncate_dim == 512
+        assert config.document_prefix == ""
+        assert config.query_prefix == ""
 
     def test_from_env_no_var_returns_default(self) -> None:
         """Test from_env with no ENYAL_MODEL_NAME returns default."""
@@ -32,7 +34,7 @@ class TestModelConfig:
             # Remove ENYAL_MODEL_NAME if present
             os.environ.pop("ENYAL_MODEL_NAME", None)
             config = ModelConfig.from_env()
-            assert config.name == "nomic-ai/nomic-embed-text-v1.5"
+            assert config.name == "Qwen/Qwen3-Embedding-0.6B"
 
     def test_from_env_known_model(self) -> None:
         """Test from_env with a known model name."""
@@ -74,6 +76,7 @@ class TestModelConfig:
 
     def test_registry_contains_known_models(self) -> None:
         """Test that MODEL_REGISTRY has all expected models."""
+        assert "Qwen/Qwen3-Embedding-0.6B" in MODEL_REGISTRY
         assert "nomic-ai/nomic-embed-text-v1.5" in MODEL_REGISTRY
         assert "all-MiniLM-L6-v2" in MODEL_REGISTRY
         assert "intfloat/e5-small-v2" in MODEL_REGISTRY
@@ -122,7 +125,7 @@ class TestEmbeddingEngine:
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("ENYAL_MODEL_NAME", None)
             engine = EmbeddingEngine()
-            assert engine.config.name == "nomic-ai/nomic-embed-text-v1.5"
+            assert engine.config.name == "Qwen/Qwen3-Embedding-0.6B"
 
     def test_embed_applies_document_prefix(self) -> None:
         """Test that embed prepends document_prefix."""
@@ -274,10 +277,8 @@ class TestEmbeddingEngine:
             mock_st.return_value = MagicMock()
             engine.get_model()
 
-            mock_st.assert_called_once_with(
-                "nomic-ai/nomic-embed-text-v1.5",
-                trust_remote_code=True,
-            )
+            call_kwargs = mock_st.call_args.kwargs
+            assert call_kwargs.get("trust_remote_code") is True
 
     def test_get_model_no_trust_remote_code(self) -> None:
         """Test that trust_remote_code is not passed when False."""
@@ -292,8 +293,8 @@ class TestEmbeddingEngine:
             mock_st.return_value = MagicMock()
             engine.get_model()
 
-            # Should be called without trust_remote_code kwarg
-            mock_st.assert_called_once_with("all-MiniLM-L6-v2")
+            call_kwargs = mock_st.call_args.kwargs
+            assert "trust_remote_code" not in call_kwargs
 
     def test_preload_calls_get_model(self) -> None:
         """Test that preload calls get_model."""
@@ -344,6 +345,115 @@ class TestEmbeddingEngine:
 
         call_kwargs = mock_model.encode.call_args.kwargs
         assert call_kwargs.get("show_progress_bar") is False
+
+    def test_embed_query_with_prompt_name(self) -> None:
+        """Test that embed_query passes prompt_name when config has query_prompt_name."""
+        config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+        engine = EmbeddingEngine(config)
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.random.rand(512).astype(np.float32)
+        engine._model = mock_model
+
+        engine.embed_query("search query")
+
+        call_kwargs = mock_model.encode.call_args.kwargs
+        assert call_kwargs.get("prompt_name") == "query"
+        # The raw text should be passed (no manual prefix)
+        call_args = mock_model.encode.call_args[0][0]
+        assert call_args == "search query"
+
+    def test_embed_batch_query_with_prompt_name(self) -> None:
+        """Test that embed_batch passes prompt_name for query task with Qwen3."""
+        config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+        engine = EmbeddingEngine(config)
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.random.rand(2, 512).astype(np.float32)
+        engine._model = mock_model
+
+        texts = ["query one", "query two"]
+        engine.embed_batch(texts, task="query")
+
+        call_kwargs = mock_model.encode.call_args.kwargs
+        assert call_kwargs.get("prompt_name") == "query"
+        # Texts should be passed without prefix
+        call_args = mock_model.encode.call_args[0][0]
+        assert call_args == ["query one", "query two"]
+
+    def test_get_model_passes_truncate_dim(self) -> None:
+        """Test that get_model passes truncate_dim to SentenceTransformer."""
+        config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+        engine = EmbeddingEngine(config)
+
+        with (
+            patch("enyal.embeddings.engine._ensure_ssl_configured"),
+            patch(
+                "enyal.core.ssl_config.get_model_path",
+                return_value="Qwen/Qwen3-Embedding-0.6B",
+            ),
+            patch("sentence_transformers.SentenceTransformer") as mock_st,
+        ):
+            mock_st.return_value = MagicMock()
+            engine.get_model()
+
+            call_kwargs = mock_st.call_args.kwargs
+            assert call_kwargs.get("truncate_dim") == 512
+            assert call_kwargs.get("trust_remote_code") is True
+
+    def test_get_model_macos_sdpa_workaround(self) -> None:
+        """Test that macOS SDPA workaround passes attn_implementation=eager."""
+        config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+        engine = EmbeddingEngine(config)
+
+        with (
+            patch("enyal.embeddings.engine._ensure_ssl_configured"),
+            patch(
+                "enyal.core.ssl_config.get_model_path",
+                return_value="Qwen/Qwen3-Embedding-0.6B",
+            ),
+            patch("enyal.embeddings.engine.sys") as mock_sys,
+            patch("sentence_transformers.SentenceTransformer") as mock_st,
+        ):
+            mock_sys.platform = "darwin"
+            mock_st.return_value = MagicMock()
+            engine.get_model()
+
+            call_kwargs = mock_st.call_args.kwargs
+            assert call_kwargs.get("model_kwargs", {}).get("attn_implementation") == "eager"
+
+    def test_embed_batch_empty_qwen3(self) -> None:
+        """Test batch embedding with empty list for Qwen3."""
+        config = MODEL_REGISTRY["Qwen/Qwen3-Embedding-0.6B"]
+        engine = EmbeddingEngine(config)
+
+        result = engine.embed_batch([])
+        assert result.shape == (0, 512)
+
+    def test_nomic_einops_guard(self) -> None:
+        """Test that loading nomic model without einops gives helpful error."""
+        config = MODEL_REGISTRY["nomic-ai/nomic-embed-text-v1.5"]
+        engine = EmbeddingEngine(config)
+
+        import builtins
+
+        original_import = builtins.__import__
+
+        def selective_import(name, *args, **kwargs):
+            if name == "einops":
+                raise ImportError("No module named 'einops'")
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("enyal.embeddings.engine._ensure_ssl_configured"),
+            patch(
+                "enyal.core.ssl_config.get_model_path",
+                return_value="nomic-ai/nomic-embed-text-v1.5",
+            ),
+            patch("builtins.__import__", side_effect=selective_import),
+            pytest.raises(ImportError, match="enyal\\[nomic\\]"),
+        ):
+            engine.get_model()
 
 
 class TestGetModelSSLAutoRecovery:

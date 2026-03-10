@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Bump this when embedding strategy changes (e.g., adding normalization)
 # without changing the model name or dimension.
-EMBEDDING_VERSION = "1"
+EMBEDDING_VERSION = "2"
 
 
 class MigrationStatus(Enum):

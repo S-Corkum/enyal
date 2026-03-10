@@ -43,7 +43,14 @@ def cmd_remember(args: argparse.Namespace) -> int:
 def cmd_recall(args: argparse.Namespace) -> int:
     """Handle the recall command."""
     store = get_store(args.db)
-    retrieval = RetrievalEngine(store)
+    reranker = None
+    if os.environ.get("ENYAL_RERANKER_MODEL") or os.environ.get(
+        "ENYAL_ENABLE_RERANKER", ""
+    ).lower() == "true":
+        from enyal.embeddings.reranker import RerankerEngine
+
+        reranker = RerankerEngine()
+    retrieval = RetrievalEngine(store, reranker=reranker)
 
     results = retrieval.search(
         query=args.query,
@@ -454,7 +461,7 @@ def main() -> int:
     model_download_parser.add_argument(
         "--model",
         "-m",
-        help="Model name (default: nomic-ai/nomic-embed-text-v1.5)",
+        help="Model name (default: Qwen/Qwen3-Embedding-0.6B)",
     )
     model_download_parser.add_argument(
         "--cache-dir",

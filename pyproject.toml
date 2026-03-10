@@ -1,6 +1,6 @@
 [project]
 name = "enyal"
-version = "0.8.0"
+version = "0.9.0"
 description = "Persistent, queryable memory for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,8 +30,6 @@ dependencies = [
     "pydantic>=2.10.0,<3.0.0",
     # sentence-transformers handles torch as transitive dependency
     "sentence-transformers>=3.2.0,<6.0.0",
-    # Required for nomic-embed-text-v1.5 model architecture
-    "einops>=0.8.0",
     # NumPy: 2.x for Python 3.13+, 1.26.x for Python 3.11-3.12
     "numpy>=2.2.0; python_version >= '3.13'",
     "numpy>=1.26.0,<2.0.0; python_version < '3.13'",
@@ -45,6 +43,10 @@ dev = [
     "ruff>=0.9.0",
     "mypy>=1.15.0",
     "types-requests>=2.32.0",
+]
+nomic = [
+    # Required for nomic-embed-text-v1.5 model architecture
+    "einops>=0.8.0",
 ]
 corporate = [
     # Recommended for corporate environments with SSL inspection (Netskope, Zscaler, etc.)
@@ -137,5 +139,5 @@ required-environments = [
 # Constrain transitive deps: transformers 5.x requires torch>=2.4 which has no macOS Intel wheel.
 # sentence-transformers 5.x accepts transformers>=4.41.0, so capping at <5.0.0 keeps macOS Intel working.
 constraint-dependencies = [
-    "transformers>=4.41.0,<5.0.0",
+    "transformers>=4.51.0,<5.0.0",
 ]

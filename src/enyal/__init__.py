@@ -1,6 +1,6 @@
 """Enyal: Persistent, queryable memory for AI coding agents."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 from enyal.core.retrieval import RetrievalEngine
 from enyal.core.store import ContextStore
