@@ -25,35 +25,35 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=2.0.0",
-    "sqlite-vec>=0.1.0",
-    "pydantic>=2.0.0",
+    "fastmcp>=2.13.0,<3.0.0",  # 3.x has breaking changes (lifespan, decorator, constructor)
+    "sqlite-vec>=0.1.6",
+    "pydantic>=2.10.0,<3.0.0",
     # sentence-transformers handles torch as transitive dependency
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=3.2.0,<6.0.0",
     # Required for nomic-embed-text-v1.5 model architecture
-    "einops>=0.7.0",
-    # NumPy: 2.0+ for Python 3.13, 1.26.x for Python 3.11-3.12
-    "numpy>=2.0.0; python_version >= '3.13'",
+    "einops>=0.8.0",
+    # NumPy: 2.x for Python 3.13+, 1.26.x for Python 3.11-3.12
+    "numpy>=2.2.0; python_version >= '3.13'",
     "numpy>=1.26.0,<2.0.0; python_version < '3.13'",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.0.0",
-    "ruff>=0.4.0",
-    "mypy>=1.10.0",
-    "types-requests>=2.31.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.0",
+    "mypy>=1.15.0",
+    "types-requests>=2.32.0",
 ]
 corporate = [
     # Recommended for corporate environments with SSL inspection (Netskope, Zscaler, etc.)
     # Makes Python use the OS native trust store instead of certifi
-    "truststore>=0.9.0",
+    "truststore>=0.10.0",
 ]
 onnx = [
-    "onnxruntime>=1.18.0",
-    "optimum>=1.19.0",
+    "onnxruntime>=1.20.0",
+    "optimum>=1.21.0",
 ]
 
 [project.scripts]
@@ -126,3 +126,16 @@ exclude_lines = [
 [tool.uv]
 # Note: macOS Intel + Python 3.13 is not supported due to PyTorch ecosystem constraints.
 # Users on macOS Intel should use: uvx --python 3.12 enyal serve
+# Ensure uv resolves wheels for all supported platforms (including macOS Intel)
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'win32'",
+]
+# Constrain transitive deps: transformers 5.x requires torch>=2.4 which has no macOS Intel wheel.
+# sentence-transformers 5.x accepts transformers>=4.41.0, so capping at <5.0.0 keeps macOS Intel working.
+constraint-dependencies = [
+    "transformers>=4.41.0,<5.0.0",
+]
